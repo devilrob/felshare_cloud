@@ -1,10 +1,10 @@
 {
   "domain": "felshare",
-  "name": "Felshare (Cloud MQTT)",
+  "name": "Felshare Diffuser (Unofficial) - Cloud MQTT",
   "version": "0.1.6.3",
-  "documentation": "https://example.invalid/felshare",
-  "issue_tracker": "https://example.invalid/felshare/issues",
-  "codeowners": [],
+  "documentation": "https://github.com/devilrob/HA_Felshare_Diffuser",
+  "issue_tracker": "https://github.com/devilrob/HA_Felshare_Diffuser/issues",
+  "codeowners": ["@devilrob"],
   "iot_class": "cloud_push",
   "config_flow": true,
   "integration_type": "device"
