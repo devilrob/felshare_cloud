@@ -1,20 +1,20 @@
 {
   "domain": "felshare",
   "name": "Felshare (Cloud MQTT)",
-  "version": "0.1.6.4",
-  "documentation": "https://github.com/devilrob/HA_Felshare_Diffuser",
-  "issue_tracker": "https://github.com/devilrob/HA_Felshare_Diffuser/issues",
   "codeowners": [
     "@devilrob"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/devilrob/HA_Felshare_Diffuser",
+  "integration_type": "device",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/devilrob/HA_Felshare_Diffuser/issues",
+  "loggers": [
+    "felshare",
+    "paho.mqtt"
   ],
   "requirements": [
     "paho-mqtt==2.1.0"
   ],
-  "iot_class": "cloud_push",
-  "config_flow": true,
-  "integration_type": "device",
-  "loggers": [
-    "felshare",
-    "paho.mqtt"
-  ]
+  "version": "0.1.6.4"
 }
