@@ -1,0 +1,11 @@
+{
+  "domain": "felshare",
+  "name": "Felshare (Cloud MQTT)",
+  "version": "0.1.6.3",
+  "documentation": "https://example.invalid/felshare",
+  "issue_tracker": "https://example.invalid/felshare/issues",
+  "codeowners": [],
+  "iot_class": "cloud_push",
+  "config_flow": true,
+  "integration_type": "device"
+}
