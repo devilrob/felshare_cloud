@@ -7,10 +7,14 @@
   "codeowners": [
     "@devilrob"
   ],
+  "requirements": [
+    "paho-mqtt==2.1.0"
+  ],
   "iot_class": "cloud_push",
   "config_flow": true,
   "integration_type": "device",
   "loggers": [
-    "custom_components.felshare"
+    "felshare",
+    "paho.mqtt"
   ]
 }

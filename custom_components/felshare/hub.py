@@ -10,6 +10,7 @@ import urllib.request
 import urllib.parse
 from datetime import datetime
 from typing import Callable, Optional
+from asyncio import run_coroutine_threadsafe
 import paho.mqtt.client as mqtt
 from paho.mqtt.client import CallbackAPIVersion
 
@@ -105,16 +106,20 @@ class FelshareHub:
             pass
 
     def _emit(self) -> None:
+        # Callback is expected to be thread-safe (coordinator marshals into HA loop).
         if self._cb:
-            # Always marshal to the HA event loop to avoid thread-safety warnings.
-            self.hass.loop.call_soon_threadsafe(self._cb, self.state)
+            try:
+                self._cb(self.state)
+            except Exception:
+                # Never let callback exceptions crash the MQTT thread.
+                self.logger.debug("State callback raised", exc_info=True)
 
     def _persist_sync_payload(self, payload: bytes) -> None:
-        async def _save() -> None:
-            await self._store.async_save({"payload_hex": payload.hex()})
-
         try:
-            self.hass.loop.call_soon_threadsafe(lambda: asyncio.create_task(_save()))
+            run_coroutine_threadsafe(
+                self._store.async_save({"payload_hex": payload.hex()}),
+                self.hass.loop,
+            )
         except Exception as e:
             self.logger.debug("Failed persisting sync payload: %s", e)
 
