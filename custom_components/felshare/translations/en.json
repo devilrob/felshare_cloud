@@ -20,4 +20,18 @@
       "cannot_connect": "Cannot connect or login failed."
     }
   }
+  ,
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options",
+        "description": "Tune how often Home Assistant requests status and how the integration reconnects.",
+        "data": {
+          "poll_interval_minutes": "Polling interval (minutes, 0=disabled)",
+          "enable_txd_learning": "Enable TXD learning (sniff app requests)",
+          "max_backoff_seconds": "Max backoff between retries (seconds)"
+        }
+      }
+    }
+  }
 }

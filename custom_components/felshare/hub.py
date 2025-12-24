@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import asyncio
 import logging
+import random
 import ssl
 import threading
 import time
@@ -31,6 +32,10 @@ from .const import (
     CONF_EMAIL,
     CONF_PASSWORD,
     CONF_DEVICE_ID,
+    CONF_ENABLE_TXD_LEARNING,
+    CONF_MAX_BACKOFF_SECONDS,
+    DEFAULT_ENABLE_TXD_LEARNING,
+    DEFAULT_MAX_BACKOFF_SECONDS,
 )
 from .models import FelshareState
 
@@ -54,6 +59,19 @@ class FelshareHub:
         self.password: str = entry.data[CONF_PASSWORD]
         self.device_id: str = entry.data[CONF_DEVICE_ID]
 
+        # Options (safe defaults)
+        self._enable_txd_learning = bool(
+            entry.options.get(CONF_ENABLE_TXD_LEARNING, DEFAULT_ENABLE_TXD_LEARNING)
+        )
+        try:
+            self._max_backoff_seconds = int(
+                entry.options.get(CONF_MAX_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS)
+            )
+        except Exception:
+            self._max_backoff_seconds = DEFAULT_MAX_BACKOFF_SECONDS
+        # Bound the backoff so it can't become unreasonable.
+        self._max_backoff_seconds = max(30, min(self._max_backoff_seconds, 3600))
+
         self.state = FelshareState(device_id=self.device_id)
 
         # Learn/persist the app's "status request" TXD payload so HA can request state on startup.
@@ -64,6 +82,10 @@ class FelshareHub:
 
         self._token: Optional[str] = None
         self._mqtt: Optional[mqtt.Client] = None
+        # Keep a reference to the current paho client so we can stop its loop thread cleanly.
+        self._client: Optional[mqtt.Client] = None
+        self._last_connect_rc: int | None = None
+        self._last_disconnect_rc: int | None = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._cb: Optional[StateCallback] = None
@@ -95,15 +117,7 @@ class FelshareHub:
 
     def _stop_blocking(self) -> None:
         self._stop.set()
-        with self._lock:
-            c = self._mqtt
-            self._mqtt = None
-        try:
-            if c:
-                c.disconnect()
-                c.loop_stop()
-        except Exception:
-            pass
+        self._stop_mqtt_client()
 
     def _emit(self) -> None:
         # Callback is expected to be thread-safe (coordinator marshals into HA loop).
@@ -122,6 +136,39 @@ class FelshareHub:
             )
         except Exception as e:
             self.logger.debug("Failed persisting sync payload: %s", e)
+
+    def _rc_to_int(self, rc) -> int | None:
+        if rc is None:
+            return None
+        try:
+            return int(getattr(rc, "value", rc))
+        except Exception:
+            return None
+
+    def _sleep_backoff(self, seconds: float) -> None:
+        """Sleep with jitter, but return immediately when stop is set."""
+        if seconds <= 0:
+            return
+        # +-20% jitter to avoid a perfectly periodic (bot-like) pattern.
+        jitter = random.uniform(-0.2, 0.2) * seconds
+        delay = max(1.0, seconds + jitter)
+        self._stop.wait(delay)
+
+    def _stop_mqtt_client(self) -> None:
+        """Stop the current paho loop thread and drop client references."""
+        with self._lock:
+            c = self._client
+            self._client = None
+            self._mqtt = None
+        if c:
+            try:
+                c.disconnect()
+            except Exception:
+                pass
+            try:
+                c.loop_stop()
+            except Exception:
+                pass
 
     def request_status(self) -> None:
         """Ask the device to publish its current status (learned from the mobile app)."""
@@ -160,32 +207,81 @@ class FelshareHub:
                 self._token = tok
                 return True
         except Exception as e:
-            self.logger.error("Login failed: %s", e)
+            # Login can fail temporarily due to network issues or server throttling.
+            # Keep it at WARNING to avoid flooding logs.
+            self.logger.warning("Login failed: %s", e)
+            self.logger.debug("Login traceback", exc_info=True)
         self._token = None
         return False
 
     def _run(self) -> None:
-        # Keep trying login + mqtt connect until stopped
+        """Main background loop.
+
+        Key goals:
+        - Avoid aggressive re-login loops (high ban risk).
+        - Reuse the same token across reconnections when possible.
+        - Use exponential backoff with jitter on failures.
+        """
+
+        login_backoff = 5.0
+        mqtt_backoff = 3.0
+        mqtt_failures_with_token = 0
+
         while not self._stop.is_set():
             if not self._token:
                 ok = self._login()
                 if not ok:
                     self._set_connected(False)
-                    time.sleep(5)
+                    self._sleep_backoff(login_backoff)
+                    login_backoff = min(login_backoff * 2.0, float(self._max_backoff_seconds))
                     continue
+                # Login success
+                login_backoff = 5.0
+                mqtt_failures_with_token = 0
+                mqtt_backoff = 3.0
 
             try:
                 self._connect_mqtt()
+                mqtt_backoff = 3.0
+                mqtt_failures_with_token = 0
+
                 # Wait until disconnected or stop
                 while not self._stop.is_set() and self._mqtt is not None:
                     time.sleep(0.5)
+
+                # Disconnected: stop paho loop thread cleanly before reconnecting.
+                self._stop_mqtt_client()
+
+            except PermissionError as e:
+                # Likely invalid/expired token; relogin with backoff.
+                self.logger.warning("MQTT authorization failed: %s", e)
+                self._stop_mqtt_client()
+                self._token = None
+                mqtt_failures_with_token = 0
+
             except Exception as e:
-                self.logger.error("MQTT loop error: %s", e)
+                self.logger.error("MQTT error: %s", e)
+                self._stop_mqtt_client()
+                mqtt_failures_with_token += 1
 
             self._set_connected(False)
-            # force relogin after connection errors
-            self._token = None
-            time.sleep(3)
+            if self._stop.is_set():
+                break
+
+            # Decide whether we need to force a relogin.
+            rc = self._last_connect_rc if self._last_connect_rc not in (None, 0) else self._last_disconnect_rc
+            if rc in (4, 5):
+                self.logger.info("MQTT rc=%s (auth/permission). Forcing relogin.", rc)
+                self._token = None
+                mqtt_failures_with_token = 0
+            elif mqtt_failures_with_token >= 3:
+                # After multiple consecutive connect errors with the same token, refresh it.
+                self.logger.warning("Repeated MQTT failures; forcing relogin to refresh token.")
+                self._token = None
+                mqtt_failures_with_token = 0
+
+            self._sleep_backoff(mqtt_backoff)
+            mqtt_backoff = min(mqtt_backoff * 2.0, float(self._max_backoff_seconds))
 
     def _set_connected(self, connected: bool) -> None:
         self.state.connected = connected
@@ -197,7 +293,11 @@ class FelshareHub:
     # ---------------- MQTT ----------------
     def _connect_mqtt(self) -> None:
         dev = self.device_id
-        client_id = f"{dev}{CLIENT_ID_SUFFIX}ha"
+        # Add entry_id to reduce the chance of session collisions with the mobile app.
+        client_id = f"{dev}{CLIENT_ID_SUFFIX}ha_{self.entry.entry_id[:6]}"
+
+        self._last_connect_rc = None
+        self._last_disconnect_rc = None
 
         c = mqtt.Client(
             callback_api_version=CallbackAPIVersion.VERSION2,
@@ -206,6 +306,8 @@ class FelshareHub:
             protocol=mqtt.MQTTv311,
             clean_session=True,
         )
+        with self._lock:
+            self._client = c
         c.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 
         ctx = ssl.create_default_context()
@@ -220,14 +322,17 @@ class FelshareHub:
         topic_txd = f"/device/txd/{dev}"
 
         def on_connect(client, userdata, flags, reason_code, properties=None):
-            if getattr(reason_code, "value", reason_code) == 0:
+            rc_int = self._rc_to_int(reason_code)
+            self._last_connect_rc = rc_int
+            if rc_int == 0:
                 with self._lock:
                     self._mqtt = client
                 self._set_connected(True)
                 self.logger.info("MQTT connected")
                 client.subscribe(topic_rxd, qos=0)
-                # subscribe txd for debugging only; we DO NOT parse state from it
-                client.subscribe(topic_txd, qos=0)
+                # Optional: subscribe to TXD only to "learn" the app's sync payload.
+                if self._enable_txd_learning:
+                    client.subscribe(topic_txd, qos=0)
                 # Ask device to publish current state on startup.
                 # Always request both status (0x05) and bulk settings (0x0C) so HA has values even when the phone app is closed.
                 try:
@@ -243,14 +348,15 @@ class FelshareHub:
                 except Exception as e:
                     self.logger.debug("Failed sending startup requests: %s", e)
             else:
-                self.logger.error("MQTT connect failed: %s", reason_code)
+                self.logger.error("MQTT connect failed (rc=%s)", rc_int)
                 self._set_connected(False)
 
         def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
+            self._last_disconnect_rc = self._rc_to_int(reason_code)
             with self._lock:
                 if self._mqtt is client:
                     self._mqtt = None
-            self.logger.warning("MQTT disconnected: %s", reason_code)
+            self.logger.warning("MQTT disconnected (rc=%s)", self._last_disconnect_rc)
             self._set_connected(False)
 
         def on_message(client, userdata, msg):
@@ -259,16 +365,20 @@ class FelshareHub:
             self.state.last_topic = msg.topic
             self.state.last_payload_hex = _bytes_to_hex(payload)
 
-            # Remember last TXD payload (often the app sends a "status request" and device replies with 0x05).
-            if msg.topic == topic_txd and payload:
+            # Remember last TXD payload (optional "learning" mode only).
+            if self._enable_txd_learning and msg.topic == topic_txd and payload:
                 self._last_txd_payload = payload
                 self._last_txd_ts = time.time()
 
-            # Parse frames coming from the device.
-            if payload and msg.topic in (topic_rxd, topic_txd):
+            # Parse frames coming from the device (RXD only).
+            if payload and msg.topic == topic_rxd:
                 if payload[0] == 0x05:
                     # If we just saw a TXD packet and now we get a status frame, learn the TXD as "sync" request.
-                    if self._last_txd_payload and (time.time() - self._last_txd_ts) < 2.0:
+                    if (
+                        self._enable_txd_learning
+                        and self._last_txd_payload
+                        and (time.time() - self._last_txd_ts) < 2.0
+                    ):
                         op = self._last_txd_payload[0]
                         # Ignore our own "set" commands; we want the app's "status request".
                         if op not in (0x03, 0x04, 0x08, 0x0E, 0x0F, 0x10, 0x32):
@@ -290,16 +400,41 @@ class FelshareHub:
         c.on_disconnect = on_disconnect
         c.on_message = on_message
 
-        c.connect(MQTT_HOST, MQTT_PORT, keepalive=20)
-        c.loop_start()
+        try:
+            c.connect(MQTT_HOST, MQTT_PORT, keepalive=20)
+            c.loop_start()
 
-        # wait for connect or stop
-        t0 = time.time()
-        while not self._stop.is_set():
-            if self.state.connected:
-                return
-            if time.time() - t0 > 15:
-                raise RuntimeError("MQTT connect timeout")
+            # wait for connect or stop
+            t0 = time.time()
+            while not self._stop.is_set():
+                if self.state.connected:
+                    return
+
+                # If broker rejected the connection, fail fast.
+                if self._last_connect_rc is not None and self._last_connect_rc != 0:
+                    rc = self._last_connect_rc
+                    if rc in (4, 5):
+                        raise PermissionError(f"MQTT not authorized (rc={rc})")
+                    raise RuntimeError(f"MQTT connect failed (rc={rc})")
+
+                if time.time() - t0 > 15:
+                    raise RuntimeError("MQTT connect timeout")
+        except Exception:
+            # Ensure we don't leak a paho thread when the connect attempt fails.
+            with self._lock:
+                if self._client is c:
+                    self._client = None
+                if self._mqtt is c:
+                    self._mqtt = None
+            try:
+                c.disconnect()
+            except Exception:
+                pass
+            try:
+                c.loop_stop()
+            except Exception:
+                pass
+            raise
 
     def _parse_rxd_status(self, p: bytes) -> None:
         # Empirical parsing from captures:

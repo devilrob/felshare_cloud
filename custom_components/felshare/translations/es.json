@@ -20,4 +20,18 @@
       "cannot_connect": "No se pudo conectar o el login falló."
     }
   }
+  ,
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opciones",
+        "description": "Ajusta con qué frecuencia Home Assistant solicita el estado y cómo se reconecta la integración.",
+        "data": {
+          "poll_interval_minutes": "Intervalo de sondeo (minutos, 0=desactivado)",
+          "enable_txd_learning": "Habilitar aprendizaje TXD (captura solicitudes de la app)",
+          "max_backoff_seconds": "Máximo backoff entre reintentos (segundos)"
+        }
+      }
+    }
+  }
 }

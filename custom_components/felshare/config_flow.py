@@ -18,6 +18,12 @@ from .const import (
     CONF_DEVICE_NAME,
     CONF_DEVICE_MODEL,
     CONF_DEVICE_STATE,
+    CONF_POLL_INTERVAL_MINUTES,
+    CONF_ENABLE_TXD_LEARNING,
+    CONF_MAX_BACKOFF_SECONDS,
+    DEFAULT_POLL_INTERVAL_MINUTES,
+    DEFAULT_ENABLE_TXD_LEARNING,
+    DEFAULT_MAX_BACKOFF_SECONDS,
     API_BASE,
 )
 
@@ -68,6 +74,10 @@ def _pick(d: dict, *keys: str) -> Any | None:
 
 class FelshareConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
+        return FelshareOptionsFlowHandler(config_entry)
 
     def __init__(self) -> None:
         self._email: str | None = None
@@ -164,3 +174,31 @@ class FelshareConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema({vol.Required(CONF_DEVICE_ID): vol.In(self._device_options)})
         return self.async_show_form(step_id="device", data_schema=schema, errors=errors)
+
+
+class FelshareOptionsFlowHandler(config_entries.OptionsFlow):
+    """Options for the Felshare integration."""
+
+    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+        self._entry = entry
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        poll_minutes = self._entry.options.get(CONF_POLL_INTERVAL_MINUTES, DEFAULT_POLL_INTERVAL_MINUTES)
+        enable_txd = self._entry.options.get(CONF_ENABLE_TXD_LEARNING, DEFAULT_ENABLE_TXD_LEARNING)
+        max_backoff = self._entry.options.get(CONF_MAX_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS)
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_POLL_INTERVAL_MINUTES, default=poll_minutes): vol.All(
+                    vol.Coerce(int), vol.Range(min=0, max=240)
+                ),
+                vol.Required(CONF_ENABLE_TXD_LEARNING, default=enable_txd): bool,
+                vol.Required(CONF_MAX_BACKOFF_SECONDS, default=max_backoff): vol.All(
+                    vol.Coerce(int), vol.Range(min=30, max=3600)
+                ),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)

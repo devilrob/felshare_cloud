@@ -13,12 +13,12 @@ from .hub import FelshareHub
 class FelshareCoordinator(DataUpdateCoordinator[FelshareState]):
     """Push-based coordinator (MQTT thread -> HA loop)."""
 
-    def __init__(self, hass: HomeAssistant, hub: FelshareHub) -> None:
+    def __init__(self, hass: HomeAssistant, hub: FelshareHub, poll_interval: timedelta | None) -> None:
         super().__init__(
             hass,
             logger=hub.logger,
             name="felshare",
-            update_interval=timedelta(minutes=5),  # poll fallback
+            update_interval=poll_interval,  # poll fallback (optional)
         )
         self.hub = hub
         self.data = hub.state
@@ -40,6 +40,7 @@ class FelshareCoordinator(DataUpdateCoordinator[FelshareState]):
 
     async def _async_update_data(self) -> FelshareState:
         # Best-effort polling: request status periodically so HA can refresh even if the phone app is closed.
+        # If polling is disabled (update_interval=None), HA won't call this.
         try:
             self.hub.request_status()
         except Exception:
