@@ -4,7 +4,6 @@ import functools
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.const import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.exceptions import HomeAssistantError
@@ -12,9 +11,8 @@ from homeassistant.exceptions import HomeAssistantError
 from .const import (
     DOMAIN,
     CONF_HVAC_SYNC_ENABLED,
-    CONF_HVAC_SYNC_DAYS_MASK,
+    CONF_HVAC_SYNC_CLIMATE_ENTITY,
     DEFAULT_HVAC_SYNC_ENABLED,
-    DEFAULT_HVAC_SYNC_DAYS_MASK,
 )
 from .coordinator import FelshareCoordinator
 from .entity import FelshareEntity
@@ -63,20 +61,8 @@ async def async_setup_entry(
 
     async_add_entities(entities)
 
-    # Add HVAC sync day toggles
-    hvac_entities: list[SwitchEntity] = []
-    for key, label, bit in _DAYS:
-        hvac_entities.append(
-            FelshareHvacSyncDaySwitch(
-                coordinator,
-                entry,
-                dev,
-                key=key,
-                label=label,
-                bit=bit,
-            )
-        )
-    async_add_entities(hvac_entities)
+    # NOTE: Older versions exposed separate HVAC Sync day toggles. As of 0.1.6.10,
+    # HVAC Sync reuses the diffuser Work schedule (days + start/end) to avoid duplicates.
 
 
 class FelsharePowerSwitch(FelshareEntity, SwitchEntity):
@@ -138,7 +124,7 @@ class FelshareWorkEnabledSwitch(FelshareEntity, SwitchEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Work schedule"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "00_work_schedule"
     _attr_icon = "mdi:calendar-clock"
 
@@ -153,19 +139,25 @@ class FelshareWorkEnabledSwitch(FelshareEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs) -> None:
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_enabled, True)
+            ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
+            if ctl is not None:
+                await ctl.async_evaluate(force=True)
         except Exception as e:
             raise HomeAssistantError(str(e))
 
     async def async_turn_off(self, **kwargs) -> None:
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_enabled, False)
+            ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
+            if ctl is not None:
+                await ctl.async_evaluate(force=True)
         except Exception as e:
             raise HomeAssistantError(str(e))
 
 
 class FelshareWorkDaySwitch(FelshareEntity, SwitchEntity):
     _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_icon = "mdi:calendar-week"
 
     def __init__(
@@ -211,6 +203,9 @@ class FelshareWorkDaySwitch(FelshareEntity, SwitchEntity):
             await self.hass.async_add_executor_job(
                 functools.partial(self.coordinator.hub.publish_work_schedule, days_mask=mask)
             )
+            ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
+            if ctl is not None:
+                await ctl.async_evaluate(force=True)
         except Exception as e:
             raise HomeAssistantError(str(e))
 
@@ -220,7 +215,7 @@ class FelshareHvacSyncEnabledSwitch(FelshareEntity, SwitchEntity):
 
     _attr_has_entity_name = True
     _attr_name = "HVAC sync"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "89_hvac_sync"
     _attr_icon = "mdi:hvac"
 
@@ -233,6 +228,10 @@ class FelshareHvacSyncEnabledSwitch(FelshareEntity, SwitchEntity):
         return bool(self._entry.options.get(CONF_HVAC_SYNC_ENABLED, DEFAULT_HVAC_SYNC_ENABLED))
 
     async def async_turn_on(self, **kwargs) -> None:
+        # Thermostat selection is required for HVAC sync mode.
+        sel = (self._entry.options.get(CONF_HVAC_SYNC_CLIMATE_ENTITY) or "").strip()
+        if not sel:
+            raise HomeAssistantError("Select a thermostat in 'HVAC sync thermostat' first")
         await self._async_set(True)
 
     async def async_turn_off(self, **kwargs) -> None:
@@ -249,53 +248,3 @@ class FelshareHvacSyncEnabledSwitch(FelshareEntity, SwitchEntity):
         self.async_write_ha_state()
 
 
-class FelshareHvacSyncDaySwitch(FelshareEntity, SwitchEntity):
-    """Toggle HVAC Sync day-of-week mask (independent from the diffuser's own Work schedule)."""
-
-    _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.CONFIG
-    _attr_icon = "mdi:calendar-week"
-
-    def __init__(
-        self,
-        coordinator: FelshareCoordinator,
-        entry: ConfigEntry,
-        dev: str,
-        *,
-        key: str,
-        label: str,
-        bit: int,
-    ) -> None:
-        super().__init__(coordinator, entry, dev)
-        self._key = key
-        self._bit = bit
-        self._attr_name = f"HVAC sync day {label}"
-        self._attr_unique_id = f"{self._entry_id}_{dev}_hvac_sync_day_{key}"
-        self._attr_suggested_object_id = f"93_hvac_sync_day_{key}"
-
-    @property
-    def is_on(self) -> bool | None:
-        mask = int(self._entry.options.get(CONF_HVAC_SYNC_DAYS_MASK, DEFAULT_HVAC_SYNC_DAYS_MASK) or 0)
-        return bool(mask & self._bit)
-
-    async def async_turn_on(self, **kwargs) -> None:
-        await self._async_set(True)
-
-    async def async_turn_off(self, **kwargs) -> None:
-        await self._async_set(False)
-
-    async def _async_set(self, on: bool) -> None:
-        mask = int(self._entry.options.get(CONF_HVAC_SYNC_DAYS_MASK, DEFAULT_HVAC_SYNC_DAYS_MASK) or 0)
-        if on:
-            mask |= self._bit
-        else:
-            mask &= ~self._bit
-
-        new_opts = dict(self._entry.options)
-        new_opts[CONF_HVAC_SYNC_DAYS_MASK] = int(mask)
-        self.hass.config_entries.async_update_entry(self._entry, options=new_opts)
-
-        ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
-        if ctl is not None:
-            await ctl.async_evaluate(force=True)
-        self.async_write_ha_state()

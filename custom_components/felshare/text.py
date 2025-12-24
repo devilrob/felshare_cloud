@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.const import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.components.text import TextEntity, TextMode
 from homeassistant.exceptions import HomeAssistantError
@@ -30,7 +29,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 class FelshareOilNameText(FelshareEntity, TextEntity):
     _attr_has_entity_name = True
     _attr_name = "Oil name"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "oil_name"
     _attr_icon = "mdi:flower"
     _attr_mode = TextMode.TEXT
@@ -55,7 +54,7 @@ class FelshareOilNameText(FelshareEntity, TextEntity):
 class FelshareWorkStartText(FelshareEntity, TextEntity):
     _attr_has_entity_name = True
     _attr_name = "Work start (HH:MM)"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "01_work_start"
     _attr_icon = "mdi:clock-start"
     _attr_mode = TextMode.TEXT
@@ -74,6 +73,9 @@ class FelshareWorkStartText(FelshareEntity, TextEntity):
     async def async_set_value(self, value: str) -> None:
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_start, value)
+            ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
+            if ctl is not None:
+                await ctl.async_evaluate(force=True)
         except Exception as e:
             raise HomeAssistantError(str(e))
 
@@ -81,7 +83,7 @@ class FelshareWorkStartText(FelshareEntity, TextEntity):
 class FelshareWorkEndText(FelshareEntity, TextEntity):
     _attr_has_entity_name = True
     _attr_name = "Work end (HH:MM)"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "02_work_end"
     _attr_icon = "mdi:clock-end"
     _attr_mode = TextMode.TEXT
@@ -100,5 +102,8 @@ class FelshareWorkEndText(FelshareEntity, TextEntity):
     async def async_set_value(self, value: str) -> None:
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_end, value)
+            ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
+            if ctl is not None:
+                await ctl.async_evaluate(force=True)
         except Exception as e:
             raise HomeAssistantError(str(e))

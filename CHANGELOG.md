@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.6.10
+### 🔁 HVAC Sync now reuses Work schedule (no duplicates)
+- HVAC Sync no longer has its own separate days/start/end entities.
+- HVAC Sync uses the diffuser **Work schedule** (days + start/end) and simply toggles the diffuser schedule ON/OFF based on thermostat **cooling**.
+- Legacy HVAC Sync day/time entities are automatically **disabled & hidden** on upgrade to reduce clutter.
+- Work schedule edits (days/start/end/on/off) now trigger an immediate HVAC Sync re-evaluation.
+
+## 0.1.6.9
+### 🧩 UI / Entity grouping
+- Removed `entity_category: config` from user-facing controls (Work schedule, HVAC Sync, oil settings).
+  - This prevents Home Assistant from putting *everything* under the device **Configuration** section.
+  - Entities now show under normal **Controls/Sensors** and can be arranged in Lovelace cards as you prefer.
+  - On upgrade, the integration also clears previously stored "config" categories from the entity registry.
+
 ## 0.1.6.8
 ### ✅ Release cleanup (publish-ready)
 - Version scheme normalized to **0.1.6.8** (no extra suffix).

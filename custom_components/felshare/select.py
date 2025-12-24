@@ -3,7 +3,6 @@ from __future__ import annotations
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.const import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, CONF_HVAC_SYNC_CLIMATE_ENTITY
@@ -29,7 +28,7 @@ class FelshareHvacThermostatSelect(FelshareEntity, SelectEntity):
 
     _attr_has_entity_name = True
     _attr_name = "HVAC sync thermostat"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_icon = "mdi:thermostat"
     _attr_suggested_object_id = "90_hvac_sync_thermostat"
 

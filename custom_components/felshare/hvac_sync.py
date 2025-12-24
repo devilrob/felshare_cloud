@@ -14,15 +14,9 @@ from .const import (
     DOMAIN,
     CONF_HVAC_SYNC_ENABLED,
     CONF_HVAC_SYNC_CLIMATE_ENTITY,
-    CONF_HVAC_SYNC_DAYS_MASK,
-    CONF_HVAC_SYNC_START,
-    CONF_HVAC_SYNC_END,
     CONF_HVAC_SYNC_ON_DELAY_SECONDS,
     CONF_HVAC_SYNC_OFF_DELAY_SECONDS,
     DEFAULT_HVAC_SYNC_ENABLED,
-    DEFAULT_HVAC_SYNC_DAYS_MASK,
-    DEFAULT_HVAC_SYNC_START,
-    DEFAULT_HVAC_SYNC_END,
     DEFAULT_HVAC_SYNC_ON_DELAY_SECONDS,
     DEFAULT_HVAC_SYNC_OFF_DELAY_SECONDS,
 )
@@ -32,7 +26,7 @@ from .const import (
 _WEEKDAY_TO_BIT = [0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x01]  # Mon..Sun
 
 
-def _parse_hhmm(value: str | None, default: str) -> dtime:
+def _parse_hhmm(value: str | None, default: str = "00:00") -> dtime:
     s = (value or default or "00:00").strip()
     try:
         hh, mm = s.split(":", 1)
@@ -95,11 +89,12 @@ class HvacSyncStatus:
 
 
 class FelshareHvacSyncController:
-    """Optionally sync diffuser power with a HA climate entity's active cooling state.
+    """Optionally sync the diffuser Work schedule with a HA climate entity.
 
     Goals:
-    - Simple UX: expose settings as entities so user can place them in a dashboard card
-    - Safe behavior: avoid rapid toggles via on/off delays and rely on MQTT rate limiting
+    - Simple UX: HVAC Sync reuses the diffuser's own Work schedule (days + start/end)
+      so the user doesn't have to configure two separate schedules.
+    - Safe behavior: avoid rapid toggles via on/off delays and rely on MQTT rate limiting.
     """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator) -> None:
@@ -169,14 +164,13 @@ class FelshareHvacSyncController:
         opts = self._opts()
         enabled = bool(opts.get(CONF_HVAC_SYNC_ENABLED, DEFAULT_HVAC_SYNC_ENABLED))
         climate_entity = (opts.get(CONF_HVAC_SYNC_CLIMATE_ENTITY) or "").strip() or None
-        # Days mask is stored as an int in options; be defensive if it arrives as a string.
-        try:
-            days_mask = int(opts.get(CONF_HVAC_SYNC_DAYS_MASK, DEFAULT_HVAC_SYNC_DAYS_MASK) or DEFAULT_HVAC_SYNC_DAYS_MASK)
-        except Exception:
-            days_mask = DEFAULT_HVAC_SYNC_DAYS_MASK
-        days_mask &= 0x7F
-        start = _parse_hhmm(opts.get(CONF_HVAC_SYNC_START), DEFAULT_HVAC_SYNC_START)
-        end = _parse_hhmm(opts.get(CONF_HVAC_SYNC_END), DEFAULT_HVAC_SYNC_END)
+        # HVAC Sync schedule window is taken from the diffuser's own Work schedule.
+        d = self.coordinator.data
+        days_mask = int(d.work_days_mask or 0) & 0x7F
+        start_s = (d.work_start or "").strip() or None
+        end_s = (d.work_end or "").strip() or None
+        start = _parse_hhmm(start_s)
+        end = _parse_hhmm(end_s)
 
         on_delay = int(opts.get(CONF_HVAC_SYNC_ON_DELAY_SECONDS, DEFAULT_HVAC_SYNC_ON_DELAY_SECONDS) or 0)
         off_delay = int(opts.get(CONF_HVAC_SYNC_OFF_DELAY_SECONDS, DEFAULT_HVAC_SYNC_OFF_DELAY_SECONDS) or 0)
@@ -186,16 +180,18 @@ class FelshareHvacSyncController:
 
         st = self.hass.states.get(climate_entity) if climate_entity else None
         cooling = _is_cooling(st)
-        in_window = _in_schedule(now, days_mask=days_mask, start=start, end=end) if enabled else False
+
+        schedule_ok = bool(start_s and end_s and days_mask)
+        in_window = _in_schedule(now, days_mask=days_mask, start=start, end=end) if (enabled and schedule_ok) else False
 
         self.logger.debug(
-            "HVACSync eval: enabled=%s climate=%s hvac_action=%s in_window=%s start=%s end=%s days_mask=0x%02X on_delay=%ss off_delay=%ss",
+            "HVACSync eval: enabled=%s climate=%s hvac_action=%s in_window=%s work_start=%s work_end=%s days_mask=0x%02X on_delay=%ss off_delay=%ss",
             enabled,
             climate_entity,
             (st.attributes.get("hvac_action") if st else None),
             in_window,
-            start.strftime("%H:%M"),
-            end.strftime("%H:%M"),
+            (start_s or ""),
+            (end_s or ""),
             days_mask,
             on_delay,
             off_delay,
@@ -203,11 +199,15 @@ class FelshareHvacSyncController:
 
         # Decide desired power
         if not enabled:
+            # When HVAC Sync is disabled, do not override the diffuser schedule.
             desired = False
             reason = "disabled"
         elif not climate_entity:
             desired = False
             reason = "no_thermostat_selected"
+        elif not schedule_ok:
+            desired = False
+            reason = "work_schedule_not_configured"
         elif not in_window:
             desired = False
             reason = "out_of_schedule"
@@ -224,6 +224,14 @@ class FelshareHvacSyncController:
         self.status.in_window = in_window
         self.status.desired_power = desired
         self.status.last_reason = reason
+
+        # If disabled, clear pending and stop enforcing.
+        if not enabled:
+            self._last_desired = None
+            self._pending_target = None
+            self._pending_until = None
+            self.status.pending_until_ts = None
+            return
 
         # If we have a pending change, wait until its due.
         if self._pending_target is not None and self._pending_until is not None:
@@ -263,24 +271,24 @@ class FelshareHvacSyncController:
         if not getattr(self.coordinator.data, "connected", False):
             return
 
-        current_power = getattr(self.coordinator.data, "power_on", None)
-        if current_power is None:
+        current_work = getattr(self.coordinator.data, "work_enabled", None)
+        if current_work is None:
             # If unknown, avoid toggling aggressively.
             return
 
-        if current_power == desired:
+        if current_work == desired:
             return
 
         # Apply action
         try:
             self.logger.info(
-                "HVACSync action: set_power=%s (current=%s) reason=%s",
+                "HVACSync action: set_work_schedule=%s (current=%s) reason=%s",
                 desired,
-                current_power,
+                current_work,
                 reason,
             )
-            await self.hass.async_add_executor_job(self.coordinator.hub.publish_power, desired)
+            await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_enabled, desired)
             self.status.last_action_ts = now_ts
         except Exception as e:
             self.status.last_reason = f"error: {e}"
-            self.logger.warning("HVACSync publish_power failed: %s", e)
+            self.logger.warning("HVACSync publish_work_enabled failed: %s", e)

@@ -3,7 +3,7 @@ from __future__ import annotations
 DOMAIN = "felshare"
 
 # Integration version (kept in code to build polite UA strings and diagnostics)
-VERSION = "0.1.6.8"
+VERSION = "0.1.6.10"
 
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
@@ -36,9 +36,12 @@ DEFAULT_BULK_MIN_INTERVAL_HOURS = 6
 DEFAULT_STARTUP_STALE_MINUTES = 30
 
 # HVAC Sync (optional): follow a Home Assistant climate entity and only run the diffuser
-# when HVAC is actively cooling (and within schedule).
+# when HVAC is actively cooling. The schedule window is taken from the diffuser's
+# own Work schedule (days + start/end), to avoid duplicated day/time entities.
 CONF_HVAC_SYNC_ENABLED = "hvac_sync_enabled"
 CONF_HVAC_SYNC_CLIMATE_ENTITY = "hvac_sync_climate_entity"
+# Deprecated (kept for backwards compatibility): previously HVAC Sync had its own
+# independent schedule. As of 0.1.6.10, HVAC Sync uses the diffuser Work schedule.
 CONF_HVAC_SYNC_DAYS_MASK = "hvac_sync_days_mask"
 CONF_HVAC_SYNC_START = "hvac_sync_start"
 CONF_HVAC_SYNC_END = "hvac_sync_end"
@@ -67,4 +70,6 @@ MQTT_PORT = 443
 MQTT_WS_PATH = "/mqtt"
 
 # We only forward the platforms we actually implement in this package.
-PLATFORMS: list[str] = ["sensor", "switch", "number", "text", "button", "select", "time"]
+# NOTE: the "time" platform was removed in 0.1.6.10 because HVAC Sync no longer
+# exposes separate start/end time entities (it reuses Work schedule).
+PLATFORMS: list[str] = ["sensor", "switch", "number", "text", "button", "select"]

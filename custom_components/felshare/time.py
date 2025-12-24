@@ -5,7 +5,6 @@ from datetime import time as dtime
 from homeassistant.components.time import TimeEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.const import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -48,7 +47,7 @@ async def async_setup_entry(
 
 
 class _BaseHvacTime(FelshareEntity, TimeEntity):
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_icon = "mdi:clock-outline"
 
     _key: str

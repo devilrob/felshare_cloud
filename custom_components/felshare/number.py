@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.const import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.exceptions import HomeAssistantError
@@ -36,7 +35,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class _BaseHvacSyncDelayNumber(FelshareEntity, NumberEntity):
-    _attr_entity_category = EntityCategory.CONFIG
+    # Intentionally not EntityCategory.CONFIG so HA doesn't group everything under
+    # the device "Configuration" section.
+    _attr_entity_category = None
     _attr_native_unit_of_measurement = "s"
     _attr_mode = NumberMode.BOX
     _attr_native_min_value = 0
@@ -95,7 +96,7 @@ class FelshareHvacSyncOffDelaySecondsNumber(_BaseHvacSyncDelayNumber):
 class FelshareConsumptionNumber(FelshareEntity, NumberEntity):
     _attr_has_entity_name = True
     _attr_name = "Consumption"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "consumption"
     _attr_native_unit_of_measurement = "ml/h"
     _attr_icon = "mdi:water"
@@ -122,7 +123,7 @@ class FelshareConsumptionNumber(FelshareEntity, NumberEntity):
 class FelshareCapacityNumber(FelshareEntity, NumberEntity):
     _attr_has_entity_name = True
     _attr_name = "Oil capacity"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "capacity"
     _attr_native_unit_of_measurement = "ml"
     _attr_icon = "mdi:cup-water"
@@ -149,7 +150,7 @@ class FelshareCapacityNumber(FelshareEntity, NumberEntity):
 class FelshareRemainOilNumber(FelshareEntity, NumberEntity):
     _attr_has_entity_name = True
     _attr_name = "Remaining oil"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "remain_oil"
     _attr_native_unit_of_measurement = "ml"
     _attr_icon = "mdi:cup-water"
@@ -176,7 +177,7 @@ class FelshareRemainOilNumber(FelshareEntity, NumberEntity):
 class FelshareWorkRunSecondsNumber(FelshareEntity, NumberEntity):
     _attr_has_entity_name = True
     _attr_name = "Work run (seconds)"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "03_work_run_s"
     _attr_native_unit_of_measurement = "s"
     _attr_icon = "mdi:timer-outline"
@@ -204,7 +205,7 @@ class FelshareWorkRunSecondsNumber(FelshareEntity, NumberEntity):
 class FelshareWorkStopSecondsNumber(FelshareEntity, NumberEntity):
     _attr_has_entity_name = True
     _attr_name = "Work stop (seconds)"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
     _attr_suggested_object_id = "04_work_stop_s"
     _attr_native_unit_of_measurement = "s"
     _attr_icon = "mdi:timer-off-outline"
