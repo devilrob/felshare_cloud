@@ -1,7 +1,7 @@
 {
   "domain": "felshare",
   "name": "Felshare (Cloud MQTT)",
-  "version": "0.1.6.5",
+  "version": "0.1.6.5-hardened",
   "documentation": "https://github.com/devilrob/HA_Felshare_Diffuser",
   "issue_tracker": "https://github.com/devilrob/HA_Felshare_Diffuser/issues",
   "codeowners": [

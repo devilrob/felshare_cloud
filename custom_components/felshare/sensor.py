@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.const import PERCENTAGE, EntityCategory
@@ -9,6 +11,15 @@ from homeassistant.components.sensor import SensorEntity
 from .const import DOMAIN
 from .coordinator import FelshareCoordinator
 from .entity import FelshareEntity
+
+
+def _iso_from_ts(ts: float | None) -> str | None:
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -56,10 +67,29 @@ class FelshareMqttStatusSensor(FelshareEntity, SensorEntity):
     @property
     def extra_state_attributes(self):
         d = self.coordinator.data
+        hub = getattr(self.coordinator, "hub", None)
         return {
             "last_seen": d.last_seen.isoformat() if d.last_seen else None,
+            "last_seen_ts": d.last_seen_ts,
+            "last_seen_utc": _iso_from_ts(d.last_seen_ts),
+
+            "last_publish_ts": d.last_publish_ts,
+            "last_publish_utc": _iso_from_ts(d.last_publish_ts),
+
+            "last_status_request_ts": d.last_status_request_ts,
+            "last_status_request_utc": _iso_from_ts(d.last_status_request_ts),
+
+            "last_bulk_request_ts": d.last_bulk_request_ts,
+            "last_bulk_request_utc": _iso_from_ts(d.last_bulk_request_ts),
+
             "last_topic": d.last_topic,
             "last_payload_hex": d.last_payload_hex,
+
+            # Surface hardening knobs for easier debugging
+            "cfg_min_publish_interval_s": getattr(hub, "_min_publish_interval_s", None),
+            "cfg_max_burst": getattr(hub, "_max_burst", None),
+            "cfg_status_min_interval_s": getattr(hub, "_status_min_interval_s", None),
+            "cfg_bulk_min_interval_s": getattr(hub, "_bulk_min_interval_s", None),
         }
 
 

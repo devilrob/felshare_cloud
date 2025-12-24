@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import json
-import asyncio
 import logging
 import random
 import ssl
 import threading
 import time
-import urllib.request
+import urllib.error
 import urllib.parse
+import urllib.request
+from collections import OrderedDict, deque
 from datetime import datetime
 from typing import Callable, Optional
-from asyncio import run_coroutine_threadsafe
+
 import paho.mqtt.client as mqtt
 from paho.mqtt.client import CallbackAPIVersion
 
@@ -21,6 +22,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     DOMAIN,
+    VERSION,
     API_BASE,
     FRONT_URL,
     MQTT_HOST,
@@ -36,6 +38,17 @@ from .const import (
     CONF_MAX_BACKOFF_SECONDS,
     DEFAULT_ENABLE_TXD_LEARNING,
     DEFAULT_MAX_BACKOFF_SECONDS,
+    # Hardening options
+    CONF_MIN_PUBLISH_INTERVAL_SECONDS,
+    CONF_MAX_BURST_MESSAGES,
+    CONF_STATUS_MIN_INTERVAL_SECONDS,
+    CONF_BULK_MIN_INTERVAL_HOURS,
+    CONF_STARTUP_STALE_MINUTES,
+    DEFAULT_MIN_PUBLISH_INTERVAL_SECONDS,
+    DEFAULT_MAX_BURST_MESSAGES,
+    DEFAULT_STATUS_MIN_INTERVAL_SECONDS,
+    DEFAULT_BULK_MIN_INTERVAL_HOURS,
+    DEFAULT_STARTUP_STALE_MINUTES,
 )
 from .models import FelshareState
 
@@ -48,7 +61,15 @@ def _bytes_to_hex(b: bytes) -> str:
 
 
 class FelshareHub:
-    """Handles API login + MQTT in a background thread (paho-mqtt)."""
+    """Handles API login + MQTT in a background thread (paho-mqtt).
+
+    Hardened goals:
+    - Rate limit outbound MQTT (min interval + burst cap)
+    - Coalesce duplicate / rapid-fire commands
+    - Debounce status polling and bulk (0x0C)
+    - Avoid "startup spam" on reconnect
+    - Use polite HTTP headers and safer backoff
+    """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -63,14 +84,41 @@ class FelshareHub:
         self._enable_txd_learning = bool(
             entry.options.get(CONF_ENABLE_TXD_LEARNING, DEFAULT_ENABLE_TXD_LEARNING)
         )
-        try:
-            self._max_backoff_seconds = int(
-                entry.options.get(CONF_MAX_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS)
-            )
-        except Exception:
-            self._max_backoff_seconds = DEFAULT_MAX_BACKOFF_SECONDS
-        # Bound the backoff so it can't become unreasonable.
-        self._max_backoff_seconds = max(30, min(self._max_backoff_seconds, 3600))
+        self._max_backoff_seconds = self._as_int_option(
+            CONF_MAX_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, min_v=30, max_v=3600
+        )
+
+        # Hardening options
+        self._min_publish_interval_s = self._as_float_option(
+            CONF_MIN_PUBLISH_INTERVAL_SECONDS,
+            DEFAULT_MIN_PUBLISH_INTERVAL_SECONDS,
+            min_v=0.2,
+            max_v=10.0,
+        )
+        self._max_burst = self._as_int_option(
+            CONF_MAX_BURST_MESSAGES,
+            DEFAULT_MAX_BURST_MESSAGES,
+            min_v=1,
+            max_v=20,
+        )
+        self._status_min_interval_s = self._as_int_option(
+            CONF_STATUS_MIN_INTERVAL_SECONDS,
+            DEFAULT_STATUS_MIN_INTERVAL_SECONDS,
+            min_v=10,
+            max_v=3600,
+        )
+        self._bulk_min_interval_s = 3600 * self._as_int_option(
+            CONF_BULK_MIN_INTERVAL_HOURS,
+            DEFAULT_BULK_MIN_INTERVAL_HOURS,
+            min_v=1,
+            max_v=72,
+        )
+        self._startup_stale_after_s = 60 * self._as_int_option(
+            CONF_STARTUP_STALE_MINUTES,
+            DEFAULT_STARTUP_STALE_MINUTES,
+            min_v=1,
+            max_v=24 * 60,
+        )
 
         self.state = FelshareState(device_id=self.device_id)
 
@@ -92,6 +140,15 @@ class FelshareHub:
 
         self._lock = threading.Lock()
 
+        # Outbound MQTT hardening
+        self._outbox: "OrderedDict[str, bytes]" = OrderedDict()
+        self._outbox_cv = threading.Condition()
+        self._publish_history: deque[float] = deque(maxlen=200)
+
+        # Login throttling (HTTP 401/403/429)
+        self._login_blocked_until: float = 0.0
+
+    # ---------------- lifecycle (HA loop) ----------------
     async def async_start(self, cb: StateCallback) -> None:
         self._cb = cb
         # Load saved sync payload (if any) so we can request state on startup.
@@ -118,6 +175,9 @@ class FelshareHub:
     def _stop_blocking(self) -> None:
         self._stop.set()
         self._stop_mqtt_client()
+        with self._outbox_cv:
+            self._outbox.clear()
+            self._outbox_cv.notify_all()
 
     def _emit(self) -> None:
         # Callback is expected to be thread-safe (coordinator marshals into HA loop).
@@ -130,6 +190,8 @@ class FelshareHub:
 
     def _persist_sync_payload(self, payload: bytes) -> None:
         try:
+            from asyncio import run_coroutine_threadsafe
+
             run_coroutine_threadsafe(
                 self._store.async_save({"payload_hex": payload.hex()}),
                 self.hass.loop,
@@ -169,26 +231,63 @@ class FelshareHub:
                 c.loop_stop()
             except Exception:
                 pass
+        with self._outbox_cv:
+            self._outbox_cv.notify_all()
 
+    # ---------------- hardening: status requests ----------------
     def request_status(self) -> None:
-        """Ask the device to publish its current status (learned from the mobile app)."""
-        # In practice we can safely request state with 0x05 (status) and 0x0C (bulk settings).
-        # Some firmwares also use a proprietary "sync" payload learned from the mobile app; we still support it.
+        """Ask the device to publish its current status.
+
+        Debounced and bulk-throttled to reduce backend load.
+        """
+        now = time.time()
+
+        # Debounce: avoid multiple status requests per minute (default).
+        if self.state.last_status_request_ts and (now - self.state.last_status_request_ts) < self._status_min_interval_s:
+            return
+
+        # Status request (sync payload if learned; else 0x05)
         try:
-            if self._sync_payload:
-                self._publish(self._sync_payload)
-            else:
-                self._publish(b"\x05")
-            # Bulk (includes work schedule / days)
-            self._publish(b"\x0C")
+            self.state.last_status_request_ts = now
+            payload = self._sync_payload if self._sync_payload else b"\x05"
+            self._publish(payload, key="status_request")
         except Exception as e:
-            self.logger.debug("request_status failed: %s", e)
+            self.logger.debug("request_status status publish failed: %s", e)
 
+        # Bulk request 0x0C (work schedule etc.)
+        if self._should_request_bulk(now):
+            try:
+                self.state.last_bulk_request_ts = now
+                self._publish(b"\x0C", key="bulk_request")
+            except Exception as e:
+                self.logger.debug("request_status bulk publish failed: %s", e)
 
+        self._emit()
+
+    def _should_request_bulk(self, now: float) -> bool:
+        # Strict cap: at most once per configured interval, unless state appears stale.
+        last = self.state.last_bulk_request_ts
+        if last and (now - last) < self._bulk_min_interval_s:
+            # Allow early refresh only if we don't have schedule fields yet.
+            return self._bulk_state_is_stale()
+        return True
+
+    def _bulk_state_is_stale(self) -> bool:
+        d = self.state
+        # If any key work fields are missing, we consider bulk state stale.
+        if not d.work_start or not d.work_end:
+            return True
+        if d.work_run_s is None or d.work_stop_s is None:
+            return True
+        if d.work_days_mask is None or d.work_enabled is None:
+            return True
+        return False
+
+    # ---------------- login (HTTP) ----------------
     def _login(self) -> bool:
         """Login to Felshare cloud API and store session token.
 
-        Uses stdlib urllib to avoid external deps/requirements (and HA pip constraint issues).
+        Uses stdlib urllib to avoid external deps.
         """
         try:
             url = f"{API_BASE}/login"
@@ -196,7 +295,11 @@ class FelshareHub:
             req = urllib.request.Request(
                 url,
                 data=payload,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": f"HomeAssistant-Felshare/{VERSION}",
+                },
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=20) as resp:
@@ -206,28 +309,55 @@ class FelshareHub:
             if tok:
                 self._token = tok
                 return True
+        except urllib.error.HTTPError as e:
+            code = getattr(e, "code", None)
+            # Read body (best-effort) for debugging.
+            try:
+                _ = e.read()
+            except Exception:
+                pass
+
+            # Explicit handling to avoid aggressive retry loops.
+            if code in (401, 403):
+                self.logger.warning("Login rejected (HTTP %s). Pausing to avoid retry loops.", code)
+                self._login_blocked_until = max(self._login_blocked_until, time.time() + min(3600, self._max_backoff_seconds))
+            elif code == 429:
+                retry_after = 0
+                try:
+                    ra = e.headers.get("Retry-After")
+                    retry_after = int(ra) if ra else 0
+                except Exception:
+                    retry_after = 0
+                cooldown = max(120, retry_after or 0)
+                cooldown = min(max(cooldown, 120), max(300, self._max_backoff_seconds))
+                self.logger.warning("Login rate-limited (HTTP 429). Backing off for ~%ss.", cooldown)
+                self._login_blocked_until = max(self._login_blocked_until, time.time() + cooldown)
+            else:
+                self.logger.warning("Login HTTP error (HTTP %s): %s", code, e)
+
         except Exception as e:
-            # Login can fail temporarily due to network issues or server throttling.
-            # Keep it at WARNING to avoid flooding logs.
+            # Login can fail temporarily due to network issues.
             self.logger.warning("Login failed: %s", e)
             self.logger.debug("Login traceback", exc_info=True)
+
         self._token = None
         return False
 
+    # ---------------- main background loop ----------------
     def _run(self) -> None:
-        """Main background loop.
-
-        Key goals:
-        - Avoid aggressive re-login loops (high ban risk).
-        - Reuse the same token across reconnections when possible.
-        - Use exponential backoff with jitter on failures.
-        """
+        """Main background loop."""
 
         login_backoff = 5.0
         mqtt_backoff = 3.0
         mqtt_failures_with_token = 0
 
         while not self._stop.is_set():
+            # Respect cooldowns from HTTP 401/403/429.
+            if self._login_blocked_until and time.time() < self._login_blocked_until:
+                self._set_connected(False)
+                self._stop.wait(max(1.0, self._login_blocked_until - time.time()))
+                continue
+
             if not self._token:
                 ok = self._login()
                 if not ok:
@@ -245,9 +375,8 @@ class FelshareHub:
                 mqtt_backoff = 3.0
                 mqtt_failures_with_token = 0
 
-                # Wait until disconnected or stop
-                while not self._stop.is_set() and self._mqtt is not None:
-                    time.sleep(0.5)
+                # While connected: service outbox with rate limiting.
+                self._service_outbox_until_disconnect()
 
                 # Disconnected: stop paho loop thread cleanly before reconnecting.
                 self._stop_mqtt_client()
@@ -275,7 +404,6 @@ class FelshareHub:
                 self._token = None
                 mqtt_failures_with_token = 0
             elif mqtt_failures_with_token >= 3:
-                # After multiple consecutive connect errors with the same token, refresh it.
                 self.logger.warning("Repeated MQTT failures; forcing relogin to refresh token.")
                 self._token = None
                 mqtt_failures_with_token = 0
@@ -285,12 +413,9 @@ class FelshareHub:
 
     def _set_connected(self, connected: bool) -> None:
         self.state.connected = connected
-        if not connected:
-            # Keep last values, but mark disconnected.
-            pass
         self._emit()
 
-    # ---------------- MQTT ----------------
+    # ---------------- MQTT connect + callbacks ----------------
     def _connect_mqtt(self) -> None:
         dev = self.device_id
         # Add entry_id to reduce the chance of session collisions with the mobile app.
@@ -333,20 +458,13 @@ class FelshareHub:
                 # Optional: subscribe to TXD only to "learn" the app's sync payload.
                 if self._enable_txd_learning:
                     client.subscribe(topic_txd, qos=0)
-                # Ask device to publish current state on startup.
-                # Always request both status (0x05) and bulk settings (0x0C) so HA has values even when the phone app is closed.
-                try:
-                    if self._sync_payload:
-                        client.publish(topic_txd, self._sync_payload, qos=0, retain=False)
-                        self.logger.debug("Sent learned sync payload on connect: %s", _bytes_to_hex(self._sync_payload))
-                    else:
-                        client.publish(topic_txd, b"\x05", qos=0, retain=False)
-                        self.logger.debug("Sent default status request (05) on connect")
 
-                    client.publish(topic_txd, b"\x0C", qos=0, retain=False)
-                    self.logger.debug("Sent bulk request (0C) on connect")
+                # Avoid startup spam on reconnection.
+                try:
+                    if self._should_request_on_connect():
+                        self.request_status()
                 except Exception as e:
-                    self.logger.debug("Failed sending startup requests: %s", e)
+                    self.logger.debug("Startup request suppressed/failed: %s", e)
             else:
                 self.logger.error("MQTT connect failed (rc=%s)", rc_int)
                 self._set_connected(False)
@@ -358,17 +476,21 @@ class FelshareHub:
                     self._mqtt = None
             self.logger.warning("MQTT disconnected (rc=%s)", self._last_disconnect_rc)
             self._set_connected(False)
+            with self._outbox_cv:
+                self._outbox_cv.notify_all()
 
         def on_message(client, userdata, msg):
             payload: bytes = msg.payload or b""
+            now_ts = time.time()
             self.state.last_seen = datetime.utcnow()
+            self.state.last_seen_ts = now_ts
             self.state.last_topic = msg.topic
             self.state.last_payload_hex = _bytes_to_hex(payload)
 
             # Remember last TXD payload (optional "learning" mode only).
             if self._enable_txd_learning and msg.topic == topic_txd and payload:
                 self._last_txd_payload = payload
-                self._last_txd_ts = time.time()
+                self._last_txd_ts = now_ts
 
             # Parse frames coming from the device (RXD only).
             if payload and msg.topic == topic_rxd:
@@ -377,7 +499,7 @@ class FelshareHub:
                     if (
                         self._enable_txd_learning
                         and self._last_txd_payload
-                        and (time.time() - self._last_txd_ts) < 2.0
+                        and (now_ts - self._last_txd_ts) < 2.0
                     ):
                         op = self._last_txd_payload[0]
                         # Ignore our own "set" commands; we want the app's "status request".
@@ -385,7 +507,10 @@ class FelshareHub:
                             if self._sync_payload != self._last_txd_payload:
                                 self._sync_payload = self._last_txd_payload
                                 self._persist_sync_payload(self._last_txd_payload)
-                                self.logger.info("Learned sync payload from app: %s", _bytes_to_hex(self._last_txd_payload))
+                                self.logger.info(
+                                    "Learned sync payload from app: %s",
+                                    _bytes_to_hex(self._last_txd_payload),
+                                )
                     self._parse_rxd_status(payload)
                 elif payload[0] == 0x0C:
                     self._parse_bulk_settings(payload)
@@ -436,6 +561,141 @@ class FelshareHub:
                 pass
             raise
 
+    def _should_request_on_connect(self) -> bool:
+        """Decide whether we should send status requests when MQTT connects.
+
+        We avoid sending 0x05/0x0C on every reconnect; only if we have no prior state
+        or the last_seen is considered stale.
+        """
+        now = time.time()
+
+        # No state yet
+        if self.state.last_seen_ts is None:
+            return True
+
+        # Key fields never populated (treat as no state)
+        if self.state.power_on is None and self.state.fan_on is None and self.state.oil_name is None:
+            return True
+
+        # Stale
+        if (now - self.state.last_seen_ts) >= self._startup_stale_after_s:
+            return True
+
+        return False
+
+    # ---------------- outbound publish queue ----------------
+    def _payload_key(self, payload: bytes) -> str:
+        if payload == b"\x0C":
+            return "bulk_request"
+        if payload == b"\x05" or (payload and payload[0] == 0x05 and len(payload) == 1):
+            return "status_request"
+        if payload and payload[0] == 0x32:
+            return "work_schedule"
+        if payload and payload[0] == 0x08:
+            return "oil_name"
+        if payload and payload[0] == 0x03:
+            return "power"
+        if payload and payload[0] == 0x04:
+            return "fan"
+        if payload and payload[0] == 0x0E:
+            return "consumption"
+        if payload and payload[0] == 0x0F:
+            return "capacity"
+        if payload and payload[0] == 0x10:
+            return "remain_oil"
+        # Fallback: dedupe only exact payloads
+        return f"raw:{payload.hex()}"
+
+    def _rate_limiter_delay(self, now: float) -> float:
+        # Enforce minimum spacing.
+        delay = 0.0
+        last_pub = self.state.last_publish_ts
+        if last_pub is not None:
+            dt = now - last_pub
+            if dt < self._min_publish_interval_s:
+                delay = max(delay, self._min_publish_interval_s - dt)
+
+        # Enforce burst cap inside a sliding window.
+        window = max(self._min_publish_interval_s * float(self._max_burst), self._min_publish_interval_s)
+        while self._publish_history and (now - self._publish_history[0]) > window:
+            self._publish_history.popleft()
+        if len(self._publish_history) >= self._max_burst:
+            oldest = self._publish_history[0]
+            delay = max(delay, (oldest + window) - now)
+
+        return max(0.0, delay)
+
+    def _service_outbox_until_disconnect(self) -> None:
+        """Runs in the hub thread while MQTT is connected."""
+        while not self._stop.is_set():
+            with self._lock:
+                connected = self._mqtt is not None and self.state.connected
+            if not connected:
+                return
+
+            key: str | None = None
+            payload: bytes | None = None
+
+            with self._outbox_cv:
+                if not self._outbox:
+                    self._outbox_cv.wait(timeout=0.5)
+                    continue
+
+                now = time.time()
+                delay = self._rate_limiter_delay(now)
+                if delay > 0:
+                    # Wake early if new commands arrive.
+                    self._outbox_cv.wait(timeout=min(delay, 2.0))
+                    continue
+
+                key, payload = self._outbox.popitem(last=False)
+
+            if payload is None:
+                continue
+
+            try:
+                self._publish_now(payload)
+            except Exception as e:
+                # If disconnected mid-flight, requeue and let reconnect logic handle it.
+                self.logger.debug("Publish failed (%s): %s", key, e)
+                with self._outbox_cv:
+                    # Put it back at the front.
+                    if key:
+                        self._outbox[key] = payload
+                        self._outbox.move_to_end(key, last=False)
+                        self._outbox_cv.notify_all()
+                return
+
+    def _publish_now(self, payload: bytes) -> None:
+        dev = self.device_id
+        topic = f"/device/txd/{dev}"
+        with self._lock:
+            c = self._mqtt
+        if not c or not self.state.connected:
+            raise RuntimeError("MQTT not connected")
+
+        c.publish(topic, payload, qos=0, retain=False)
+
+        now = time.time()
+        self.state.last_publish_ts = now
+        self._publish_history.append(now)
+
+    def _publish(self, payload: bytes, *, key: str | None = None) -> None:
+        """Enqueue a payload for outbound publish (coalesced + rate-limited)."""
+        with self._lock:
+            c = self._mqtt
+            connected = bool(c) and self.state.connected
+        if not connected:
+            raise RuntimeError("MQTT not connected")
+
+        k = key or self._payload_key(payload)
+        with self._outbox_cv:
+            self._outbox[k] = payload
+            # Ensure the newest request for the same key is sent last.
+            self._outbox.move_to_end(k, last=True)
+            self._outbox_cv.notify_all()
+
+    # ---------------- parsing ----------------
     def _parse_rxd_status(self, p: bytes) -> None:
         # Empirical parsing from captures:
         # [0]=0x05, [1:]=datetime, then fields:
@@ -483,15 +743,22 @@ class FelshareHub:
         except Exception as e:
             self.logger.debug("Failed parsing RXD payload: %s", e)
 
-
     def _decode_days_mask(self, mask: int) -> str:
         # Mon..Sun (same mapping we used in the Python capture app)
         names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         out = [names[i] for i in range(7) if (mask >> i) & 1]
         return ",".join(out) if out else "-"
 
-
-    def _set_work_schedule(self, start_h: int, start_m: int, end_h: int, end_m: int, flag: int, run_s: int, stop_s: int) -> None:
+    def _set_work_schedule(
+        self,
+        start_h: int,
+        start_m: int,
+        end_h: int,
+        end_m: int,
+        flag: int,
+        run_s: int,
+        stop_s: int,
+    ) -> None:
         self.state.work_start = f"{start_h:02d}:{start_m:02d}"
         self.state.work_end = f"{end_h:02d}:{end_m:02d}"
         self.state.work_flag_raw = flag & 0xFF
@@ -504,7 +771,6 @@ class FelshareHub:
             self.state.work_days = None
         self.state.work_run_s = int(run_s)
         self.state.work_stop_s = int(stop_s)
-
 
     def _parse_workmode_frame(self, p: bytes) -> None:
         """Parse 0x32 0x01 WorkTime frame."""
@@ -519,7 +785,6 @@ class FelshareHub:
             self._set_work_schedule(start_h, start_m, end_h, end_m, flag, run_s, stop_s)
         except Exception as e:
             self.logger.debug("Failed parsing workmode frame: %s", e)
-
 
     def _parse_bulk_settings(self, p: bytes) -> None:
         """Parse 0x0C bulk settings frame.
@@ -541,13 +806,8 @@ class FelshareHub:
         except Exception as e:
             self.logger.debug("Failed parsing bulk settings: %s", e)
 
-
     def _parse_simple_frame(self, p: bytes) -> None:
-        """Parse simple single-property frames.
-
-        Some firmwares send individual updates instead of the big 0x05 status frame.
-        This keeps the HA UI from being "blank" (unknown) when those are used.
-        """
+        """Parse simple single-property frames."""
         try:
             cmd = p[0]
             # power: 0x03 0x01/0x00
@@ -595,44 +855,39 @@ class FelshareHub:
         except Exception as e:
             self.logger.debug("Failed parsing simple frame: %s", e)
 
-
     # ---------------- commands ----------------
     def publish_power(self, on: bool) -> None:
-        # 0x03 0x01 = ON, 0x03 0x00 = OFF (captured)
-        self._publish(bytes([0x03, 0x01 if on else 0x00]))
+        self._publish(bytes([0x03, 0x01 if on else 0x00]), key="power")
         self.state.power_on = on
         self._emit()
 
     def publish_fan(self, on: bool) -> None:
-        # 0x04 0x01 = ON, 0x04 0x00 = OFF (captured)
-        self._publish(bytes([0x04, 0x01 if on else 0x00]))
+        self._publish(bytes([0x04, 0x01 if on else 0x00]), key="fan")
         self.state.fan_on = on
         self._emit()
 
     def publish_oil_name(self, name: str) -> None:
-        # 0x08 + ASCII bytes (captured). Limit to 10 bytes like app seems to do.
         b = name.encode("utf-8", errors="ignore")[:10]
-        self._publish(bytes([0x08]) + b)
+        self._publish(bytes([0x08]) + b, key="oil_name")
         self.state.oil_name = name
         self._emit()
 
     def publish_consumption(self, value_ml_per_h: float) -> None:
-        # Captured: 0x0E 0x00 0x23 where 0x0023 = 35 => 3.5
         raw = int(round(value_ml_per_h * 10))
         raw = max(0, min(raw, 65535))
-        self._publish(bytes([0x0E]) + raw.to_bytes(2, "big"))
+        self._publish(bytes([0x0E]) + raw.to_bytes(2, "big"), key="consumption")
         self.state.consumption = raw / 10.0
         self._emit()
 
     def publish_capacity(self, ml: int) -> None:
         raw = max(0, min(int(ml), 65535))
-        self._publish(bytes([0x0F]) + raw.to_bytes(2, "big"))
+        self._publish(bytes([0x0F]) + raw.to_bytes(2, "big"), key="capacity")
         self.state.capacity = raw
         self._emit()
 
     def publish_remain_oil(self, ml: int) -> None:
         raw = max(0, min(int(ml), 65535))
-        self._publish(bytes([0x10]) + raw.to_bytes(2, "big"))
+        self._publish(bytes([0x10]) + raw.to_bytes(2, "big"), key="remain_oil")
         self.state.remain_oil = raw
         self._emit()
 
@@ -735,10 +990,7 @@ class FelshareHub:
         days_mask: int | None = None,
         days: str | None = None,
     ) -> None:
-        """Send WorkTime (32 01 ...) using current state as defaults.
-
-        This device expects a full payload whenever you change any part.
-        """
+        """Send WorkTime (32 01 ...) using current state as defaults."""
         # Defaults
         sh, sm = (9, 0)
         eh, em = (21, 0)
@@ -757,7 +1009,6 @@ class FelshareHub:
         cur_stop = self.state.work_stop_s if self.state.work_stop_s is not None else 190
         cur_enabled = self.state.work_enabled if self.state.work_enabled is not None else True
         cur_days = self.state.work_days_mask if self.state.work_days_mask is not None else 0x7F
-        cur_flag = self.state.work_flag_raw if self.state.work_flag_raw is not None else ((0x80 if cur_enabled else 0x00) | (cur_days & 0x7F))
 
         # Apply updates
         if start is not None:
@@ -775,23 +1026,24 @@ class FelshareHub:
         if days_mask is not None:
             cur_days = int(days_mask) & 0x7F
 
-        # Build flag: preserve nothing except enable+days (bit7 + low7)
+        # Build flag: enable + days
         flag = (0x80 if cur_enabled else 0x00) | (cur_days & 0x7F)
-        # If we already have a raw flag from the device, keep any unknown bits *within* bit7+low7 representation.
-        # (We still overwrite enable/days because user requested it.)
-        _ = cur_flag  # reserved for future, keep variable to avoid unused warnings in edits.
 
-        payload = bytes([
-            0x32,
-            0x01,
-            sh & 0xFF,
-            sm & 0xFF,
-            eh & 0xFF,
-            em & 0xFF,
-            flag & 0xFF,
-        ]) + int(cur_run).to_bytes(2, "big") + int(cur_stop).to_bytes(2, "big")
+        payload = (
+            bytes([
+                0x32,
+                0x01,
+                sh & 0xFF,
+                sm & 0xFF,
+                eh & 0xFF,
+                em & 0xFF,
+                flag & 0xFF,
+            ])
+            + int(cur_run).to_bytes(2, "big")
+            + int(cur_stop).to_bytes(2, "big")
+        )
 
-        self._publish(payload)
+        self._publish(payload, key="work_schedule")
         # Optimistic update
         self._set_work_schedule(sh, sm, eh, em, flag, int(cur_run), int(cur_stop))
         self._emit()
@@ -814,11 +1066,17 @@ class FelshareHub:
     def publish_work_days(self, days: str) -> None:
         self.publish_work_schedule(days=days)
 
-    def _publish(self, payload: bytes) -> None:
-        dev = self.device_id
-        topic = f"/device/txd/{dev}"
-        with self._lock:
-            c = self._mqtt
-        if not c or not self.state.connected:
-            raise RuntimeError("MQTT not connected")
-        c.publish(topic, payload, qos=0, retain=False)
+    # ---------------- helpers ----------------
+    def _as_int_option(self, key: str, default: int, *, min_v: int, max_v: int) -> int:
+        try:
+            v = int(self.entry.options.get(key, default))
+        except Exception:
+            v = int(default)
+        return max(min_v, min(v, max_v))
+
+    def _as_float_option(self, key: str, default: float, *, min_v: float, max_v: float) -> float:
+        try:
+            v = float(self.entry.options.get(key, default))
+        except Exception:
+            v = float(default)
+        return max(min_v, min(v, max_v))

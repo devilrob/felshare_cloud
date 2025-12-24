@@ -12,6 +12,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     DOMAIN,
+    VERSION,
     CONF_EMAIL,
     CONF_PASSWORD,
     CONF_DEVICE_ID,
@@ -21,9 +22,19 @@ from .const import (
     CONF_POLL_INTERVAL_MINUTES,
     CONF_ENABLE_TXD_LEARNING,
     CONF_MAX_BACKOFF_SECONDS,
+    CONF_MIN_PUBLISH_INTERVAL_SECONDS,
+    CONF_MAX_BURST_MESSAGES,
+    CONF_STATUS_MIN_INTERVAL_SECONDS,
+    CONF_BULK_MIN_INTERVAL_HOURS,
+    CONF_STARTUP_STALE_MINUTES,
     DEFAULT_POLL_INTERVAL_MINUTES,
     DEFAULT_ENABLE_TXD_LEARNING,
     DEFAULT_MAX_BACKOFF_SECONDS,
+    DEFAULT_MIN_PUBLISH_INTERVAL_SECONDS,
+    DEFAULT_MAX_BURST_MESSAGES,
+    DEFAULT_STATUS_MIN_INTERVAL_SECONDS,
+    DEFAULT_BULK_MIN_INTERVAL_HOURS,
+    DEFAULT_STARTUP_STALE_MINUTES,
     API_BASE,
 )
 
@@ -32,14 +43,24 @@ async def _login_and_devices(hass: HomeAssistant, email: str, password: str) -> 
     """Login and fetch device list using HA's aiohttp session (no external deps)."""
     session = async_get_clientsession(hass)
 
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": f"HomeAssistant-Felshare/{VERSION}",
+    }
+
     # Login
     try:
         async with async_timeout.timeout(20):
             resp = await session.post(
                 f"{API_BASE}/login",
                 json={"username": email, "password": password},
-                headers={"Content-Type": "application/json"},
+                headers=headers,
             )
+            if resp.status in (401, 403):
+                raise ConnectionError("Login rejected")
+            if resp.status == 429:
+                raise ConnectionError("Login rate-limited")
             data = await resp.json(content_type=None)
     except Exception as err:
         raise ConnectionError(f"Login error: {err}") from err
@@ -53,7 +74,12 @@ async def _login_and_devices(hass: HomeAssistant, email: str, password: str) -> 
     # Devices
     try:
         async with async_timeout.timeout(20):
-            resp = await session.get(f"{API_BASE}/device", headers={"token": token})
+            resp = await session.get(
+                f"{API_BASE}/device",
+                headers={"token": token, "Accept": "application/json", "User-Agent": f"HomeAssistant-Felshare/{VERSION}"},
+            )
+            if resp.status == 429:
+                raise ConnectionError("Device list rate-limited")
             dd = await resp.json(content_type=None)
     except Exception as err:
         raise ConnectionError(f"Device list error: {err}") from err
@@ -186,15 +212,45 @@ class FelshareOptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
+        # Existing
         poll_minutes = self._entry.options.get(CONF_POLL_INTERVAL_MINUTES, DEFAULT_POLL_INTERVAL_MINUTES)
         enable_txd = self._entry.options.get(CONF_ENABLE_TXD_LEARNING, DEFAULT_ENABLE_TXD_LEARNING)
         max_backoff = self._entry.options.get(CONF_MAX_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS)
 
+        # Hardened
+        min_pub = self._entry.options.get(CONF_MIN_PUBLISH_INTERVAL_SECONDS, DEFAULT_MIN_PUBLISH_INTERVAL_SECONDS)
+        burst = self._entry.options.get(CONF_MAX_BURST_MESSAGES, DEFAULT_MAX_BURST_MESSAGES)
+        status_min = self._entry.options.get(CONF_STATUS_MIN_INTERVAL_SECONDS, DEFAULT_STATUS_MIN_INTERVAL_SECONDS)
+        bulk_hours = self._entry.options.get(CONF_BULK_MIN_INTERVAL_HOURS, DEFAULT_BULK_MIN_INTERVAL_HOURS)
+        startup_stale = self._entry.options.get(CONF_STARTUP_STALE_MINUTES, DEFAULT_STARTUP_STALE_MINUTES)
+
         schema = vol.Schema(
             {
+                # Recommended: 30–60 minutes, or 0 if MQTT is stable
                 vol.Required(CONF_POLL_INTERVAL_MINUTES, default=poll_minutes): vol.All(
                     vol.Coerce(int), vol.Range(min=0, max=240)
                 ),
+
+                # Outbound MQTT rate limiting
+                vol.Required(CONF_MIN_PUBLISH_INTERVAL_SECONDS, default=min_pub): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.2, max=10.0)
+                ),
+                vol.Required(CONF_MAX_BURST_MESSAGES, default=burst): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=20)
+                ),
+
+                # Status + bulk request throttles
+                vol.Required(CONF_STATUS_MIN_INTERVAL_SECONDS, default=status_min): vol.All(
+                    vol.Coerce(int), vol.Range(min=10, max=3600)
+                ),
+                vol.Required(CONF_BULK_MIN_INTERVAL_HOURS, default=bulk_hours): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=72)
+                ),
+                vol.Required(CONF_STARTUP_STALE_MINUTES, default=startup_stale): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=1440)
+                ),
+
+                # Misc
                 vol.Required(CONF_ENABLE_TXD_LEARNING, default=enable_txd): bool,
                 vol.Required(CONF_MAX_BACKOFF_SECONDS, default=max_backoff): vol.All(
                     vol.Coerce(int), vol.Range(min=30, max=3600)

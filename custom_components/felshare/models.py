@@ -9,7 +9,15 @@ from typing import Optional
 class FelshareState:
     device_id: str
     connected: bool = False
+
+    # Device -> cloud visibility
     last_seen: Optional[datetime] = None
+    last_seen_ts: Optional[float] = None
+
+    # Outbound command visibility (diagnostics)
+    last_publish_ts: Optional[float] = None
+    last_status_request_ts: Optional[float] = None
+    last_bulk_request_ts: Optional[float] = None
 
     power_on: Optional[bool] = None
     fan_on: Optional[bool] = None
