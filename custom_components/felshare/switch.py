@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.const import EntityCategory
@@ -183,6 +185,8 @@ class FelshareWorkDaySwitch(FelshareEntity, SwitchEntity):
             mask &= ~self._bit
 
         try:
-            await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_schedule, days_mask=mask)
+            await self.hass.async_add_executor_job(
+                functools.partial(self.coordinator.hub.publish_work_schedule, days_mask=mask)
+            )
         except Exception as e:
             raise HomeAssistantError(str(e))
