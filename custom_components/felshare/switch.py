@@ -13,15 +13,15 @@ from .const import DOMAIN
 from .coordinator import FelshareCoordinator
 from .entity import FelshareEntity
 
-# Work days bitmask: Mon=1, Tue=2, Wed=4, Thu=8, Fri=16, Sat=32, Sun=64
+# Work days bitmask (device): Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64
 _DAYS = [
-    ("mon", "Monday", 0x01),
-    ("tue", "Tuesday", 0x02),
-    ("wed", "Wednesday", 0x04),
-    ("thu", "Thursday", 0x08),
-    ("fri", "Friday", 0x10),
-    ("sat", "Saturday", 0x20),
-    ("sun", "Sunday", 0x40),
+    ("mon", "Monday", 0x02),
+    ("tue", "Tuesday", 0x04),
+    ("wed", "Wednesday", 0x08),
+    ("thu", "Thursday", 0x10),
+    ("fri", "Friday", 0x20),
+    ("sat", "Saturday", 0x40),
+    ("sun", "Sunday", 0x01),
 ]
 
 

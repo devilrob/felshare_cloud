@@ -17,7 +17,7 @@ Control Felshare waterless diffusers via the Felshare cloud MQTT service.
 - Diagnostics sensor with last seen/topic/payload + timestamps
 - **Refresh status** button (best-effort cloud status request)
 
-## Hardening / Stability (0.1.6.5-hardened)
+## Hardening / Stability (0.1.6.5-hardened-2)
 
 - Outbound MQTT publish queue with **rate limiting** + **coalescing**
 - Debounced `request_status()` and throttled bulk (0x0C)

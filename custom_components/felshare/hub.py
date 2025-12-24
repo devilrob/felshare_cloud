@@ -744,9 +744,17 @@ class FelshareHub:
             self.logger.debug("Failed parsing RXD payload: %s", e)
 
     def _decode_days_mask(self, mask: int) -> str:
-        # Mon..Sun (same mapping we used in the Python capture app)
-        names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        out = [names[i] for i in range(7) if (mask >> i) & 1]
+        # Device mapping: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64
+        order = [
+            ("Mon", 0x02),
+            ("Tue", 0x04),
+            ("Wed", 0x08),
+            ("Thu", 0x10),
+            ("Fri", 0x20),
+            ("Sat", 0x40),
+            ("Sun", 0x01),
+        ]
+        out = [name for name, bit in order if mask & bit]
         return ",".join(out) if out else "-"
 
     def _set_work_schedule(
@@ -902,7 +910,7 @@ class FelshareHub:
         return hh, mm
 
     def _days_str_to_mask(self, value: str) -> int:
-        """Parse days like: 'Mon,Wed' or 'Lun,Mié'. Mapping: Mon=1 .. Sun=64."""
+        """Parse days like: 'Mon,Wed' or 'Lun,Mié'. Mapping: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64."""
         if value is None:
             raise ValueError("days is None")
 
@@ -922,51 +930,51 @@ class FelshareHub:
         tokens = [t.strip().lower() for t in raw.replace(";", ",").replace("|", ",").split(",") if t.strip()]
         mapping = {
             # English
-            "mon": 1,
-            "monday": 1,
-            "tue": 2,
-            "tues": 2,
-            "tuesday": 2,
-            "wed": 4,
-            "wednesday": 4,
-            "thu": 8,
-            "thur": 8,
-            "thurs": 8,
-            "thursday": 8,
-            "fri": 16,
-            "friday": 16,
-            "sat": 32,
-            "saturday": 32,
-            "sun": 64,
-            "sunday": 64,
+            "mon": 2,
+            "monday": 2,
+            "tue": 4,
+            "tues": 4,
+            "tuesday": 4,
+            "wed": 8,
+            "wednesday": 8,
+            "thu": 16,
+            "thur": 16,
+            "thurs": 16,
+            "thursday": 16,
+            "fri": 32,
+            "friday": 32,
+            "sat": 64,
+            "saturday": 64,
+            "sun": 1,
+            "sunday": 1,
             # Spanish
-            "lun": 1,
-            "lunes": 1,
-            "mar": 2,
-            "martes": 2,
-            "mie": 4,
-            "mié": 4,
-            "mier": 4,
-            "miércoles": 4,
-            "miercoles": 4,
-            "jue": 8,
-            "jueves": 8,
-            "vie": 16,
-            "viernes": 16,
-            "sab": 32,
-            "sáb": 32,
-            "sábado": 32,
-            "sabado": 32,
-            "dom": 64,
-            "domingo": 64,
+            "lun": 2,
+            "lunes": 2,
+            "mar": 4,
+            "martes": 4,
+            "mie": 8,
+            "mié": 8,
+            "mier": 8,
+            "miércoles": 8,
+            "miercoles": 8,
+            "jue": 16,
+            "jueves": 16,
+            "vie": 32,
+            "viernes": 32,
+            "sab": 64,
+            "sáb": 64,
+            "sábado": 64,
+            "sabado": 64,
+            "dom": 1,
+            "domingo": 1,
             # Short single-letter (optional)
-            "m": 1,
-            "t": 2,
-            "w": 4,
-            "r": 8,
-            "f": 16,
-            "s": 32,
-            "u": 64,
+            "m": 2,
+            "t": 4,
+            "w": 8,
+            "r": 16,
+            "f": 32,
+            "s": 64,
+            "u": 1,
         }
 
         mask = 0
