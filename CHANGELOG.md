@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6.11
+### 🧠 HVAC Sync manual snapshot + lock
+- When **HVAC Sync** is turned ON, the integration saves a **persistent snapshot** of the diffuser's last manual settings.
+- While HVAC Sync is ON, **manual diffuser controls are locked** (attempts to change them from HA will be rejected).
+- When HVAC Sync is turned OFF, the integration **restores the last saved manual settings** automatically.
+
 ## 0.1.6.10
 ### 🔁 HVAC Sync now reuses Work schedule (no duplicates)
 - HVAC Sync no longer has its own separate days/start/end entities.

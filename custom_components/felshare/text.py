@@ -45,6 +45,7 @@ class FelshareOilNameText(FelshareEntity, TextEntity):
         return self.coordinator.data.oil_name
 
     async def async_set_value(self, value: str) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_oil_name, value)
         except Exception as e:
@@ -71,6 +72,7 @@ class FelshareWorkStartText(FelshareEntity, TextEntity):
         return self.coordinator.data.work_start
 
     async def async_set_value(self, value: str) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_start, value)
             ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
@@ -100,6 +102,7 @@ class FelshareWorkEndText(FelshareEntity, TextEntity):
         return self.coordinator.data.work_end
 
     async def async_set_value(self, value: str) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_end, value)
             ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")

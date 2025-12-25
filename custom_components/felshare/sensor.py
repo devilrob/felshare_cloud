@@ -70,6 +70,8 @@ class FelshareMqttStatusSensor(FelshareEntity, SensorEntity):
         hub = getattr(self.coordinator, "hub", None)
         hvac_sync = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
         hvac_status = getattr(hvac_sync, "status", None) if hvac_sync else None
+        manual_snap = getattr(hvac_sync, "_manual_snapshot", None) if hvac_sync else None
+        manual_ts = manual_snap.get("captured_ts") if isinstance(manual_snap, dict) else None
         return {
             "last_seen": d.last_seen.isoformat() if d.last_seen else None,
             "last_seen_ts": d.last_seen_ts,
@@ -107,6 +109,10 @@ class FelshareMqttStatusSensor(FelshareEntity, SensorEntity):
             "hvac_sync_last_action_utc": _iso_from_ts(getattr(hvac_status, "last_action_ts", None)),
             "hvac_sync_pending_until_ts": getattr(hvac_status, "pending_until_ts", None),
             "hvac_sync_pending_until_utc": _iso_from_ts(getattr(hvac_status, "pending_until_ts", None)),
+
+            # Manual snapshot (used when HVAC Sync is turned OFF)
+            "hvac_sync_manual_snapshot_ts": manual_ts,
+            "hvac_sync_manual_snapshot_utc": _iso_from_ts(manual_ts),
 
             # Surface hardening knobs for easier debugging
             "cfg_min_publish_interval_s": getattr(hub, "_min_publish_interval_s", None),

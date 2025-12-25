@@ -80,12 +80,14 @@ class FelsharePowerSwitch(FelshareEntity, SwitchEntity):
         return self.coordinator.data.power_on
 
     async def async_turn_on(self, **kwargs) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_power, True)
         except Exception as e:
             raise HomeAssistantError(str(e))
 
     async def async_turn_off(self, **kwargs) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_power, False)
         except Exception as e:
@@ -107,12 +109,14 @@ class FelshareFanSwitch(FelshareEntity, SwitchEntity):
         return self.coordinator.data.fan_on
 
     async def async_turn_on(self, **kwargs) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_fan, True)
         except Exception as e:
             raise HomeAssistantError(str(e))
 
     async def async_turn_off(self, **kwargs) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_fan, False)
         except Exception as e:
@@ -137,6 +141,7 @@ class FelshareWorkEnabledSwitch(FelshareEntity, SwitchEntity):
         return self.coordinator.data.work_enabled
 
     async def async_turn_on(self, **kwargs) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_enabled, True)
             ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
@@ -146,6 +151,7 @@ class FelshareWorkEnabledSwitch(FelshareEntity, SwitchEntity):
             raise HomeAssistantError(str(e))
 
     async def async_turn_off(self, **kwargs) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_enabled, False)
             ctl = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("hvac_sync")
@@ -192,6 +198,7 @@ class FelshareWorkDaySwitch(FelshareEntity, SwitchEntity):
         await self._async_set_day(False)
 
     async def _async_set_day(self, on: bool) -> None:
+        self._raise_if_hvac_sync_locked()
         d = self.coordinator.data
         mask = d.work_days_mask if d.work_days_mask is not None else 0x7F
         if on:

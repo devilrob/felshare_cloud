@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     DOMAIN,
@@ -12,6 +13,8 @@ from .const import (
     OFFLINE_AFTER_MINUTES,
     CONF_DEVICE_NAME,
     CONF_DEVICE_MODEL,
+    CONF_HVAC_SYNC_ENABLED,
+    DEFAULT_HVAC_SYNC_ENABLED,
 )
 from .coordinator import FelshareCoordinator
 
@@ -53,3 +56,18 @@ class FelshareEntity(CoordinatorEntity[FelshareCoordinator]):
         except Exception:
             # If something goes weird with timestamps, prefer not to flip entities to unavailable.
             return True
+
+    # ---------------- UX helpers ----------------
+    def _hvac_sync_enabled(self) -> bool:
+        """Return True when HVAC Sync mode is enabled for this config entry."""
+        try:
+            return bool(self._entry.options.get(CONF_HVAC_SYNC_ENABLED, DEFAULT_HVAC_SYNC_ENABLED))
+        except Exception:
+            return False
+
+    def _raise_if_hvac_sync_locked(self) -> None:
+        """Block manual edits while HVAC Sync is enabled (Option 2)."""
+        if self._hvac_sync_enabled():
+            raise HomeAssistantError(
+                "HVAC Sync is enabled: manual diffuser controls are locked. Disable 'HVAC sync' to edit settings."
+            )

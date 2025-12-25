@@ -196,6 +196,7 @@ class FelshareWorkRunSecondsNumber(FelshareEntity, NumberEntity):
         return self.coordinator.data.work_run_s
 
     async def async_set_native_value(self, value: float) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_run_s, int(value))
         except Exception as e:
@@ -224,6 +225,7 @@ class FelshareWorkStopSecondsNumber(FelshareEntity, NumberEntity):
         return self.coordinator.data.work_stop_s
 
     async def async_set_native_value(self, value: float) -> None:
+        self._raise_if_hvac_sync_locked()
         try:
             await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_stop_s, int(value))
         except Exception as e:

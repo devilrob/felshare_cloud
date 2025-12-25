@@ -8,6 +8,7 @@ from typing import Callable, Optional
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -103,6 +104,13 @@ class FelshareHvacSyncController:
         self.coordinator = coordinator
         self.logger = logging.getLogger(__name__)
 
+        # Persist the last known manual settings so we can restore them when HVAC Sync is turned off.
+        # Stored per config entry (and survives HA restarts).
+        self._manual_store: Store = Store(hass, 1, f"{DOMAIN}.manual_snapshot_{entry.entry_id}")
+        self._manual_snapshot: dict | None = None
+        self._restore_pending: bool = False
+        self._prev_enabled: bool | None = None
+
         self.status = HvacSyncStatus()
         self._unsub_state: Optional[Callable[[], None]] = None
         self._unsub_timer: Optional[Callable[[], None]] = None
@@ -112,11 +120,109 @@ class FelshareHvacSyncController:
         self._pending_target: bool | None = None
         self._pending_until: float | None = None
 
+        # NOTE: manual controls are locked while HVAC Sync is ON (Option 2).
+
     async def async_start(self) -> None:
+        # Load last manual snapshot (if any)
+        try:
+            data = await self._manual_store.async_load()
+            if isinstance(data, dict) and data.get("device_id"):
+                self._manual_snapshot = data
+        except Exception:
+            self._manual_snapshot = None
+
+        # Remember initial enabled state so first user toggle is treated as a transition.
+        self._prev_enabled = bool(self._opts().get(CONF_HVAC_SYNC_ENABLED, DEFAULT_HVAC_SYNC_ENABLED))
+
         # Periodic enforcement for schedule boundaries (and in case climate doesn't emit updates)
         self._unsub_timer = async_track_time_interval(self.hass, self._handle_tick, timedelta(seconds=60))
         await self._ensure_subscription()
         await self.async_evaluate(force=True)
+
+    async def _async_save_manual_snapshot(self, snap: dict) -> None:
+        self._manual_snapshot = snap
+        try:
+            await self._manual_store.async_save(snap)
+        except Exception:
+            # Best-effort persistence; continue anyway
+            pass
+
+    async def _async_capture_manual_snapshot(self) -> None:
+        """Capture the current diffuser settings as the "manual" baseline.
+
+        Called when HVAC Sync transitions from OFF -> ON.
+        """
+        d = self.coordinator.data
+        snap = {
+            "device_id": getattr(d, "device_id", None),
+            "captured_ts": _now_local(self.hass).timestamp(),
+            "power_on": d.power_on,
+            "fan_on": d.fan_on,
+            "oil_name": d.oil_name,
+            "work": {
+                "start": d.work_start,
+                "end": d.work_end,
+                "run_s": d.work_run_s,
+                "stop_s": d.work_stop_s,
+                "enabled": d.work_enabled,
+                "days_mask": d.work_days_mask,
+            },
+        }
+        await self._async_save_manual_snapshot(snap)
+
+    async def _async_restore_manual_snapshot(self) -> None:
+        """Restore the last saved manual settings back to the device."""
+        snap = self._manual_snapshot
+        if not isinstance(snap, dict):
+            # Try load on-demand
+            try:
+                data = await self._manual_store.async_load()
+                if isinstance(data, dict):
+                    snap = data
+                    self._manual_snapshot = data
+            except Exception:
+                snap = None
+
+        if not isinstance(snap, dict):
+            return
+
+        # If disconnected, postpone restore until we see a connected state again.
+        if not getattr(self.coordinator.data, "connected", False):
+            self._restore_pending = True
+            return
+
+        self._restore_pending = False
+
+        work = snap.get("work") if isinstance(snap.get("work"), dict) else {}
+        power_on = snap.get("power_on")
+        fan_on = snap.get("fan_on")
+        oil_name = snap.get("oil_name")
+
+        def _restore_blocking() -> None:
+            hub = self.coordinator.hub
+
+            # Restore schedule settings in a single WorkTime publish (avoids multiple MQTT writes).
+            hub.publish_work_schedule(
+                start=work.get("start"),
+                end=work.get("end"),
+                run_s=work.get("run_s"),
+                stop_s=work.get("stop_s"),
+                enabled=work.get("enabled"),
+                days_mask=work.get("days_mask"),
+            )
+
+            if oil_name is not None:
+                hub.publish_oil_name(str(oil_name))
+            if fan_on is not None:
+                hub.publish_fan(bool(fan_on))
+            if power_on is not None:
+                hub.publish_power(bool(power_on))
+
+        try:
+            await self.hass.async_add_executor_job(_restore_blocking)
+        except Exception as e:
+            self.status.last_reason = f"restore_error: {e}"
+            self.logger.warning("HVACSync restore failed: %s", e)
 
     async def async_stop(self) -> None:
         if self._unsub_state:
@@ -164,6 +270,25 @@ class FelshareHvacSyncController:
         opts = self._opts()
         enabled = bool(opts.get(CONF_HVAC_SYNC_ENABLED, DEFAULT_HVAC_SYNC_ENABLED))
         climate_entity = (opts.get(CONF_HVAC_SYNC_CLIMATE_ENTITY) or "").strip() or None
+
+        # Track transitions to support:
+        #  - OFF -> ON : capture a manual snapshot (persistent)
+        #  - ON -> OFF : restore the last manual snapshot
+        if self._prev_enabled is None:
+            self._prev_enabled = enabled
+        elif enabled and not self._prev_enabled:
+            # Capture baseline BEFORE HVAC Sync starts changing the device schedule.
+            await self._async_capture_manual_snapshot()
+        elif (not enabled) and self._prev_enabled:
+            # Restore manual state when HVAC Sync is turned off.
+            await self._async_restore_manual_snapshot()
+
+        # If HVAC Sync is disabled but we previously couldn't restore (device offline),
+        # attempt restore once the device comes back online.
+        if (not enabled) and self._restore_pending and getattr(self.coordinator.data, "connected", False):
+            await self._async_restore_manual_snapshot()
+
+        self._prev_enabled = enabled
         # HVAC Sync schedule window is taken from the diffuser's own Work schedule.
         d = self.coordinator.data
         days_mask = int(d.work_days_mask or 0) & 0x7F
