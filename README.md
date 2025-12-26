@@ -27,12 +27,24 @@ Control Felshare waterless diffusers via the Felshare cloud MQTT service.
 ## HVAC Sync
 
 If you have a thermostat integrated in Home Assistant (for example **Nest Gen 3**), you can
-optionally make the diffuser **follow active cooling**:
+optionally make the diffuser **follow active airflow**:
 
-- Diffuser turns **ON** only when the thermostat reports `hvac_action: cooling`
-- Diffuser turns **OFF** when cooling stops
-- Optional schedule window (days + start/end time)
+- By default, diffuser turns **ON** only when the thermostat reports `hvac_action: cooling`
+- Diffuser turns **OFF** when airflow stops (or cooling stops, depending on mode)
+- Schedule window uses the diffuser **Work schedule** (days + start/end)
 - Built-in **on/off delays** (defaults 60s) to avoid rapid toggles on short-cycles
+- While HVAC Sync is ON:
+  - manual diffuser controls are **locked** in Home Assistant (Option 2)
+  - the integration saves a **persistent manual snapshot** and restores it when Sync is turned OFF
+  - the integration temporarily forces **Work run/stop** to **60s / 180s** (restored when Sync is OFF)
+
+### Important: Work schedule must stay enabled
+
+Some Felshare models require **Work schedule (work mode)** to be enabled, otherwise a **Power ON** command has no effect.
+
+HVAC Sync in this integration therefore:
+- **never disables Work schedule**
+- gates diffusion by toggling **Power ON/OFF**
 
 ### Configure from your dashboard (recommended)
 
@@ -41,9 +53,25 @@ card (no Options Flow required):
 
 - `switch.*hvac_sync` (enable/disable)
 - `select.*hvac_sync_thermostat` (pick any `climate.*`)
-- `time.*hvac_sync_start` / `time.*hvac_sync_end`
-- `switch.*hvac_sync_day_*` (Mon..Sun)
+- `select.*hvac_sync_airflow` (Cooling only / Heat + Cool / Any airflow)
 - `number.*hvac_sync_on_delay_s` / `number.*hvac_sync_off_delay_s` (optional)
+
+The schedule window comes from the diffuser **Work schedule** entities:
+
+- `switch.*00_work_schedule` (must be ON)
+- `text.*01_work_start` and `text.*02_work_end`
+- `switch.*05_work_day_*` (Mon..Sun)
+
+### Tested with Google Nest (example attributes)
+
+HVAC Sync was tested using a Google Nest thermostat entity that exposes:
+
+- `hvac_action: cooling`
+- `hvac_modes: heat, cool, heat_cool, off`
+- `fan_modes: on, off`
+- `preset_modes: none, eco`
+
+If your thermostat uses different `hvac_action` strings (or doesn't expose it), please open an issue and include your climate entity attributes so we can add support.
 
 ## Installation (HACS — custom repository)
 

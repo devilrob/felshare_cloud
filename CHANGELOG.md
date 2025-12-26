@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.6.13
+### ⏱️ HVAC Sync forces Work run/stop (60/180)
+- When **HVAC Sync** is turned ON, the integration sets:
+  - **Work run (seconds)** = **60**
+  - **Work stop (seconds)** = **180**
+  (device-safe values under the 999s limit)
+- When HVAC Sync is turned OFF, the integration restores the previous manual Work schedule values
+  from the persistent manual snapshot.
+
+## 0.1.6.12
+### 🌬️ HVAC Sync improved for Felshare "Work mode required" devices
+- HVAC Sync **no longer disables Work schedule (work mode)**.
+  - Some Felshare models ignore **Power ON** unless Work mode is enabled.
+  - HVAC Sync now **keeps Work schedule enabled** and gates diffusion by toggling **Power ON/OFF**.
+- New entity: **HVAC sync airflow** (select)
+  - Choose what counts as "air running": **Cooling only** (default), **Heat + Cool**, or **Any airflow (Heat/Cool/Fan)**.
+- README updated with guidance for **Google Nest** thermostats and the new airflow mode.
+
 ## 0.1.6.11
 ### 🧠 HVAC Sync manual snapshot + lock
 - When **HVAC Sync** is turned ON, the integration saves a **persistent snapshot** of the diffuser's last manual settings.

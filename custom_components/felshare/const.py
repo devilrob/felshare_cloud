@@ -3,7 +3,7 @@ from __future__ import annotations
 DOMAIN = "felshare"
 
 # Integration version (kept in code to build polite UA strings and diagnostics)
-VERSION = "0.1.6.11"
+VERSION = "0.1.6.13"
 
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
@@ -48,12 +48,26 @@ CONF_HVAC_SYNC_END = "hvac_sync_end"
 CONF_HVAC_SYNC_ON_DELAY_SECONDS = "hvac_sync_on_delay_seconds"
 CONF_HVAC_SYNC_OFF_DELAY_SECONDS = "hvac_sync_off_delay_seconds"
 
+# HVAC Sync airflow detection mode (how we interpret "air is running")
+# Stored in entry.options and exposed as a Select entity.
+CONF_HVAC_SYNC_AIRFLOW_MODE = "hvac_sync_airflow_mode"
+
+DEFAULT_HVAC_SYNC_AIRFLOW_MODE = "cooling_only"
+
 DEFAULT_HVAC_SYNC_ENABLED = False
 DEFAULT_HVAC_SYNC_DAYS_MASK = 0x7F  # Sun..Sat
 DEFAULT_HVAC_SYNC_START = "00:00"
 DEFAULT_HVAC_SYNC_END = "23:59"
 DEFAULT_HVAC_SYNC_ON_DELAY_SECONDS = 60
 DEFAULT_HVAC_SYNC_OFF_DELAY_SECONDS = 60
+
+# When HVAC Sync is enabled, the integration temporarily forces the diffuser
+# Work run/stop cadence to predictable values. This helps align diffusion with
+# typical HVAC cycles while keeping Felshare "Work mode required" devices happy.
+#
+# These values are applied on HVAC Sync OFF->ON and restored on ON->OFF.
+HVAC_SYNC_FORCED_WORK_RUN_S = 60
+HVAC_SYNC_FORCED_WORK_STOP_S = 180
 
 # Mark entities unavailable after this many minutes without RXD updates
 OFFLINE_AFTER_MINUTES = 15

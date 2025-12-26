@@ -17,9 +17,13 @@ from .const import (
     CONF_HVAC_SYNC_CLIMATE_ENTITY,
     CONF_HVAC_SYNC_ON_DELAY_SECONDS,
     CONF_HVAC_SYNC_OFF_DELAY_SECONDS,
+    CONF_HVAC_SYNC_AIRFLOW_MODE,
+    HVAC_SYNC_FORCED_WORK_RUN_S,
+    HVAC_SYNC_FORCED_WORK_STOP_S,
     DEFAULT_HVAC_SYNC_ENABLED,
     DEFAULT_HVAC_SYNC_ON_DELAY_SECONDS,
     DEFAULT_HVAC_SYNC_OFF_DELAY_SECONDS,
+    DEFAULT_HVAC_SYNC_AIRFLOW_MODE,
 )
 
 
@@ -59,28 +63,54 @@ def _in_schedule(now: datetime, *, days_mask: int, start: dtime, end: dtime) -> 
     return t >= start or t < end
 
 
-def _is_cooling(state: State | None) -> bool:
+def _hvac_action(state: State | None) -> str | None:
+    """Return best-effort hvac_action/current_operation string."""
     if state is None:
-        return False
+        return None
     if state.state in ("unknown", "unavailable", None):
-        return False
-
-    # Preferred attribute for "actively cooling"
+        return None
     action = state.attributes.get("hvac_action")
     if action is None:
-        # Some climate integrations use current_operation
         action = state.attributes.get("current_operation")
-    if action is not None:
-        return str(action).lower() == "cooling"
+    if action is None:
+        return None
+    try:
+        s = str(action).strip().lower()
+        return s or None
+    except Exception:
+        return None
 
-    # Fallbacks
-    return str(state.state).lower() == "cooling"
+
+def _is_airflow_active(state: State | None, mode: str) -> bool:
+    """Decide if the HVAC is "running air" based on hvac_action.
+
+    We intentionally use hvac_action (runtime state) vs hvac_mode (setpoint mode).
+    """
+    act = _hvac_action(state)
+    if act is None:
+        return False
+
+    mode = (mode or "").strip().lower()
+
+    if mode in ("cooling_only", "cool_only", "cooling"):
+        return act == "cooling"
+
+    if mode in ("heat_cool", "heat+cool", "heat_cool_only", "heat_and_cool"):
+        return act in ("cooling", "heating")
+
+    # "Any airflow" tries to catch fan-only patterns across integrations.
+    if mode in ("any_airflow", "any", "airflow", "heat_cool_fan"):
+        return act in ("cooling", "heating", "fan", "fan_only", "fan-only")
+
+    # Unknown -> default to cooling-only
+    return act == "cooling"
 
 
 @dataclass
 class HvacSyncStatus:
     enabled: bool = False
     climate_entity: str | None = None
+    airflow_mode: str | None = None
     in_window: bool = False
     cooling: bool = False
     desired_power: bool = False
@@ -109,7 +139,12 @@ class FelshareHvacSyncController:
         self._manual_store: Store = Store(hass, 1, f"{DOMAIN}.manual_snapshot_{entry.entry_id}")
         self._manual_snapshot: dict | None = None
         self._restore_pending: bool = False
+        self._sync_params_pending: bool = False
         self._prev_enabled: bool | None = None
+
+        # If the device is offline when HVAC Sync is enabled, we may need to
+        # apply the forced Work run/stop values later.
+        self._forced_work_pending: bool = False
 
         self.status = HvacSyncStatus()
         self._unsub_state: Optional[Callable[[], None]] = None
@@ -169,6 +204,36 @@ class FelshareHvacSyncController:
             },
         }
         await self._async_save_manual_snapshot(snap)
+
+    async def _async_apply_forced_work_params(self) -> None:
+        """Force Work run/stop cadence while HVAC Sync is enabled.
+
+        This is a safety/UX feature requested for setups where the diffuser is
+        expected to follow HVAC runtime, but the device itself caps run/stop at
+        0..999 seconds. We keep Work mode armed and use Power ON/OFF for gating.
+        """
+
+        # If disconnected, postpone until we see a connected state again.
+        if not getattr(self.coordinator.data, "connected", False):
+            self._sync_params_pending = True
+            return
+
+        self._sync_params_pending = False
+
+        def _apply_blocking() -> None:
+            hub = self.coordinator.hub
+            # Only update run/stop (and keep work mode enabled while sync is active).
+            hub.publish_work_schedule(
+                run_s=int(HVAC_SYNC_FORCED_WORK_RUN_S),
+                stop_s=int(HVAC_SYNC_FORCED_WORK_STOP_S),
+                enabled=True,
+            )
+
+        try:
+            await self.hass.async_add_executor_job(_apply_blocking)
+        except Exception as e:
+            self.status.last_reason = f"sync_params_error: {e}"
+            self.logger.warning("HVACSync could not apply forced work run/stop: %s", e)
 
     async def _async_restore_manual_snapshot(self) -> None:
         """Restore the last saved manual settings back to the device."""
@@ -270,6 +335,7 @@ class FelshareHvacSyncController:
         opts = self._opts()
         enabled = bool(opts.get(CONF_HVAC_SYNC_ENABLED, DEFAULT_HVAC_SYNC_ENABLED))
         climate_entity = (opts.get(CONF_HVAC_SYNC_CLIMATE_ENTITY) or "").strip() or None
+        airflow_mode = (opts.get(CONF_HVAC_SYNC_AIRFLOW_MODE) or DEFAULT_HVAC_SYNC_AIRFLOW_MODE).strip() or DEFAULT_HVAC_SYNC_AIRFLOW_MODE
 
         # Track transitions to support:
         #  - OFF -> ON : capture a manual snapshot (persistent)
@@ -279,6 +345,8 @@ class FelshareHvacSyncController:
         elif enabled and not self._prev_enabled:
             # Capture baseline BEFORE HVAC Sync starts changing the device schedule.
             await self._async_capture_manual_snapshot()
+            # Force Work run/stop cadence while HVAC Sync is active.
+            await self._async_apply_forced_work_params()
         elif (not enabled) and self._prev_enabled:
             # Restore manual state when HVAC Sync is turned off.
             await self._async_restore_manual_snapshot()
@@ -287,6 +355,11 @@ class FelshareHvacSyncController:
         # attempt restore once the device comes back online.
         if (not enabled) and self._restore_pending and getattr(self.coordinator.data, "connected", False):
             await self._async_restore_manual_snapshot()
+
+        # If HVAC Sync is enabled but we couldn't apply forced run/stop earlier (device offline),
+        # retry once the device comes back online.
+        if enabled and self._sync_params_pending and getattr(self.coordinator.data, "connected", False):
+            await self._async_apply_forced_work_params()
 
         self._prev_enabled = enabled
         # HVAC Sync schedule window is taken from the diffuser's own Work schedule.
@@ -304,16 +377,27 @@ class FelshareHvacSyncController:
         now_ts = now.timestamp()
 
         st = self.hass.states.get(climate_entity) if climate_entity else None
-        cooling = _is_cooling(st)
+        airflow_active = _is_airflow_active(st, airflow_mode)
 
         schedule_ok = bool(start_s and end_s and days_mask)
+
+        # Enforce forced run/stop values while HVAC Sync is enabled. This covers
+        # cases where the user changes settings from the phone app while Sync is ON.
+        if enabled and schedule_ok and getattr(self.coordinator.data, "connected", False):
+            cur_run = getattr(d, "work_run_s", None)
+            cur_stop = getattr(d, "work_stop_s", None)
+            if cur_run is not None and cur_stop is not None:
+                if int(cur_run) != int(HVAC_SYNC_FORCED_WORK_RUN_S) or int(cur_stop) != int(HVAC_SYNC_FORCED_WORK_STOP_S):
+                    await self._async_apply_forced_work_params()
         in_window = _in_schedule(now, days_mask=days_mask, start=start, end=end) if (enabled and schedule_ok) else False
 
         self.logger.debug(
-            "HVACSync eval: enabled=%s climate=%s hvac_action=%s in_window=%s work_start=%s work_end=%s days_mask=0x%02X on_delay=%ss off_delay=%ss",
+            "HVACSync eval: enabled=%s climate=%s hvac_action=%s airflow_mode=%s airflow_active=%s in_window=%s work_start=%s work_end=%s days_mask=0x%02X on_delay=%ss off_delay=%ss",
             enabled,
             climate_entity,
             (st.attributes.get("hvac_action") if st else None),
+            airflow_mode,
+            airflow_active,
             in_window,
             (start_s or ""),
             (end_s or ""),
@@ -336,16 +420,19 @@ class FelshareHvacSyncController:
         elif not in_window:
             desired = False
             reason = "out_of_schedule"
-        elif not cooling:
+        elif not airflow_active:
             desired = False
-            reason = "hvac_not_cooling"
+            reason = "hvac_airflow_inactive"
         else:
             desired = True
-            reason = "cooling_in_schedule"
+            reason = "airflow_active_in_schedule"
 
         self.status.enabled = enabled
         self.status.climate_entity = climate_entity
-        self.status.cooling = cooling
+        self.status.airflow_mode = airflow_mode
+        # Keep attribute name "cooling" for backwards compatibility in diagnostics;
+        # value means "airflow active" per airflow_mode.
+        self.status.cooling = airflow_active
         self.status.in_window = in_window
         self.status.desired_power = desired
         self.status.last_reason = reason
@@ -396,24 +483,43 @@ class FelshareHvacSyncController:
         if not getattr(self.coordinator.data, "connected", False):
             return
 
+        # IMPORTANT: Some Felshare models require Work schedule (work mode) to stay enabled,
+        # otherwise a Power ON command has no effect.
+        #
+        # Therefore HVAC Sync **never disables work mode**. We "gate" diffusion by toggling
+        # the main Power switch instead.
+
         current_work = getattr(self.coordinator.data, "work_enabled", None)
-        if current_work is None:
+        current_power = getattr(self.coordinator.data, "power_on", None)
+        if current_power is None:
             # If unknown, avoid toggling aggressively.
             return
 
-        if current_work == desired:
+        # When Sync is enabled and schedule is configured, ensure Work mode is ON (armed).
+        # We only ever set it to True here; restoration happens when Sync is turned off.
+        if schedule_ok and current_work is False:
+            try:
+                self.logger.info("HVACSync precondition: enabling Work schedule (required for Power control)")
+                await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_enabled, True)
+            except Exception as e:
+                self.status.last_reason = f"error: {e}"
+                self.logger.warning("HVACSync could not enable Work schedule: %s", e)
+                # If we can't arm work mode, don't spam power toggles.
+                return
+
+        if bool(current_power) == bool(desired):
             return
 
-        # Apply action
+        # Apply action (Power gate)
         try:
             self.logger.info(
-                "HVACSync action: set_work_schedule=%s (current=%s) reason=%s",
+                "HVACSync action: set_power=%s (current=%s) reason=%s",
                 desired,
-                current_work,
+                current_power,
                 reason,
             )
-            await self.hass.async_add_executor_job(self.coordinator.hub.publish_work_enabled, desired)
+            await self.hass.async_add_executor_job(self.coordinator.hub.publish_power, bool(desired))
             self.status.last_action_ts = now_ts
         except Exception as e:
             self.status.last_reason = f"error: {e}"
-            self.logger.warning("HVACSync publish_work_enabled failed: %s", e)
+            self.logger.warning("HVACSync publish_power failed: %s", e)

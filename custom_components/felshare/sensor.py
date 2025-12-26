@@ -101,6 +101,7 @@ class FelshareMqttStatusSensor(FelshareEntity, SensorEntity):
             # HVAC Sync diagnostics (local automation)
             "hvac_sync_enabled": getattr(hvac_status, "enabled", None),
             "hvac_sync_climate_entity": getattr(hvac_status, "climate_entity", None),
+            "hvac_sync_airflow_mode": getattr(hvac_status, "airflow_mode", None),
             "hvac_sync_in_window": getattr(hvac_status, "in_window", None),
             "hvac_sync_cooling": getattr(hvac_status, "cooling", None),
             "hvac_sync_desired_power": getattr(hvac_status, "desired_power", None),
