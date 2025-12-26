@@ -7,7 +7,7 @@ from typing import Callable, Optional
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State, callback
-from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -86,6 +86,15 @@ def _is_airflow_active(state: State | None, mode: str) -> bool:
 
     We intentionally use hvac_action (runtime state) vs hvac_mode (setpoint mode).
     """
+    # Safety: if the thermostat is explicitly OFF, treat airflow as inactive even if
+    # some integrations briefly keep a stale hvac_action.
+    if state is not None:
+        try:
+            if str(state.state).strip().lower() == "off":
+                return False
+        except Exception:
+            pass
+
     act = _hvac_action(state)
     if act is None:
         return False
@@ -149,6 +158,7 @@ class FelshareHvacSyncController:
         self.status = HvacSyncStatus()
         self._unsub_state: Optional[Callable[[], None]] = None
         self._unsub_timer: Optional[Callable[[], None]] = None
+        self._unsub_pending: Optional[Callable[[], None]] = None
         self._subscribed_entity: str | None = None
 
         self._last_desired: bool | None = None
@@ -156,6 +166,30 @@ class FelshareHvacSyncController:
         self._pending_until: float | None = None
 
         # NOTE: manual controls are locked while HVAC Sync is ON (Option 2).
+
+    def _cancel_pending_timer(self) -> None:
+        if self._unsub_pending:
+            try:
+                self._unsub_pending()
+            except Exception:
+                pass
+            self._unsub_pending = None
+
+    def _arm_pending_timer(self, delay_s: float) -> None:
+        """Ensure we wake up when a pending on/off delay expires."""
+        self._cancel_pending_timer()
+
+        # Never schedule negative; also avoid 0 which would call immediately and can recurse.
+        delay_s = max(0.01, float(delay_s))
+
+        @callback
+        def _due(_now) -> None:
+            # Clear the handle first to avoid stale cancels.
+            self._unsub_pending = None
+            # Force evaluation so we don't re-arm the same delay again.
+            self.hass.async_create_task(self.async_evaluate(force=True))
+
+        self._unsub_pending = async_call_later(self.hass, delay_s, _due)
 
     async def async_start(self) -> None:
         # Load last manual snapshot (if any)
@@ -296,6 +330,7 @@ class FelshareHvacSyncController:
         if self._unsub_timer:
             self._unsub_timer()
             self._unsub_timer = None
+        self._cancel_pending_timer()
 
     def _opts(self):
         return self.entry.options
@@ -443,40 +478,78 @@ class FelshareHvacSyncController:
             self._pending_target = None
             self._pending_until = None
             self.status.pending_until_ts = None
+            self._cancel_pending_timer()
             return
 
-        # If we have a pending change, wait until its due.
+        # Track the instantaneous decision separately from a delayed/pending decision.
+        desired_now = bool(desired)
+        applied_from_pending = False
+
+        # If we have a pending change, keep waiting unless it's due OR the desired state changed.
         if self._pending_target is not None and self._pending_until is not None:
             if now_ts < self._pending_until:
-                self.status.pending_until_ts = self._pending_until
-                self.logger.debug(
-                    "HVACSync pending: target=%s apply_in=%.1fs reason=%s",
-                    self._pending_target,
-                    self._pending_until - now_ts,
-                    reason,
-                )
-                return
-            # Pending time reached, apply
-            desired = self._pending_target
+                if desired_now != bool(self._pending_target):
+                    # Desired changed while we were waiting -> restart the delay from *now*.
+                    delay = on_delay if desired_now else off_delay
+                    if delay <= 0:
+                        self._pending_target = None
+                        self._pending_until = None
+                        self.status.pending_until_ts = None
+                        self._cancel_pending_timer()
+                    else:
+                        self._pending_target = desired_now
+                        self._pending_until = now_ts + float(delay)
+                        self.status.pending_until_ts = self._pending_until
+                        self._arm_pending_timer(self._pending_until - now_ts)
+                        self.logger.debug(
+                            "HVACSync pending retargeted: target=%s apply_in=%.1fs reason=%s",
+                            self._pending_target,
+                            self._pending_until - now_ts,
+                            reason,
+                        )
+                        return
+                else:
+                    self.status.pending_until_ts = self._pending_until
+                    self.logger.debug(
+                        "HVACSync pending: target=%s apply_in=%.1fs reason=%s",
+                        self._pending_target,
+                        self._pending_until - now_ts,
+                        reason,
+                    )
+                    return
+
+            # Pending time reached.
+            if desired_now == bool(self._pending_target):
+                desired_now = bool(self._pending_target)
+                applied_from_pending = True
+            # Either way, clear pending.
             self._pending_target = None
             self._pending_until = None
             self.status.pending_until_ts = None
+            self._cancel_pending_timer()
 
-        # When desired flips, apply delay (unless forced)
-        if not force and self._last_desired is not None and desired != self._last_desired:
-            delay = on_delay if desired else off_delay
+        # When desired flips, apply delay (unless forced OR we're applying a delay that already elapsed).
+        if (
+            (not force)
+            and (not applied_from_pending)
+            and (self._last_desired is not None)
+            and (desired_now != bool(self._last_desired))
+        ):
+            delay = on_delay if desired_now else off_delay
             if delay > 0:
-                self._pending_target = desired
+                self._pending_target = desired_now
                 self._pending_until = now_ts + float(delay)
                 self.status.pending_until_ts = self._pending_until
+                self._arm_pending_timer(self._pending_until - now_ts)
                 self.logger.debug(
                     "HVACSync delayed: desired=%s delay=%ss reason=%s",
-                    desired,
+                    desired_now,
                     delay,
                     reason,
                 )
                 return
 
+        desired = desired_now
         self._last_desired = desired
 
         # Don't act if diffuser is disconnected
