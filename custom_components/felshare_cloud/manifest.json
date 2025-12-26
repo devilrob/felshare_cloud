@@ -1,5 +1,5 @@
 {
-  "domain": "felshare",
+  "domain": "felshare_cloud",
   "name": "Felshare (Cloud MQTT)",
   "codeowners": [
     "@devilrob"
