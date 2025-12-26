@@ -10,7 +10,7 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/devilrob/felshare_cloud/issues",
   "loggers": [
-    "felshare",
+    "felshare_cloud",
     "paho.mqtt"
   ],
   "requirements": [
