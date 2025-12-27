@@ -1,0 +1,174 @@
+# felshare_cloud_card_basic.yaml
+# Basic (no custom cards). Uses only core Lovelace cards.
+type: vertical-stack
+cards:
+  # Imagen / encabezado
+  - type: picture
+    image: /local/felshare/diffuser-header.jpg
+    tap_action:
+      action: none
+    hold_action:
+      action: none
+
+  # Acciones rápidas
+  - type: grid
+    columns: 5
+    square: false
+    cards:
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_POWER
+        name: Power
+        icon: mdi:power
+        tap_action:
+          action: toggle
+
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_FAN
+        name: Fan
+        icon: mdi:fan
+        tap_action:
+          action: toggle
+
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_WORK_SCHEDULE
+        name: Schedule
+        icon: mdi:calendar-clock
+        tap_action:
+          action: toggle
+
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_HVAC_SYNC
+        name: HVAC Sync
+        icon: mdi:hvac
+        tap_action:
+          action: toggle
+
+      - type: tile
+        entity: button.ENTITY_ID_AQUI_REFRESH
+        name: Refresh
+        icon: mdi:refresh
+
+  # Estado
+  - type: entities
+    title: Estado
+    show_header_toggle: false
+    entities:
+      - entity: sensor.ENTITY_ID_AQUI_MQTT_STATUS
+        name: MQTT Status
+        icon: mdi:cloud-check
+
+      - entity: sensor.ENTITY_ID_AQUI_LIQUID_LEVEL
+        name: Liquid level
+        icon: mdi:gauge
+
+      - entity: sensor.ENTITY_ID_AQUI_LAST_SEEN
+        name: Last seen
+        icon: mdi:clock-outline
+
+  # Difusión
+  - type: entities
+    title: Difusión
+    show_header_toggle: false
+    entities:
+      - entity: number.ENTITY_ID_AQUI_CONSUMPTION
+        name: Consumption (ml/h)
+        icon: mdi:water
+
+      - entity: number.ENTITY_ID_AQUI_WORK_RUN
+        name: Work run (s)
+        icon: mdi:timer-play-outline
+
+      - entity: number.ENTITY_ID_AQUI_WORK_STOP
+        name: Work stop (s)
+        icon: mdi:timer-stop-outline
+
+  # Aceite
+  - type: entities
+    title: Aceite
+    show_header_toggle: false
+    entities:
+      - entity: text.ENTITY_ID_AQUI_OIL_NAME
+        name: Oil name
+        icon: mdi:flower
+
+      - entity: number.ENTITY_ID_AQUI_CAPACITY
+        name: Capacity (ml)
+        icon: mdi:cup-water
+
+      - entity: number.ENTITY_ID_AQUI_REMAIN_OIL
+        name: Remaining oil (ml)
+        icon: mdi:cup-water
+
+  # Horario
+  - type: entities
+    title: Horario
+    show_header_toggle: false
+    entities:
+      - entity: text.ENTITY_ID_AQUI_WORK_START
+        name: Work start (HH:MM)
+        icon: mdi:clock-start
+
+      - entity: text.ENTITY_ID_AQUI_WORK_END
+        name: Work end (HH:MM)
+        icon: mdi:clock-end
+
+  # Días de la semana (tiles)
+  - type: grid
+    columns: 7
+    square: false
+    cards:
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_DAY_MON
+        name: L
+        icon: mdi:calendar
+
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_DAY_TUE
+        name: M
+        icon: mdi:calendar
+
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_DAY_WED
+        name: X
+        icon: mdi:calendar
+
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_DAY_THU
+        name: J
+        icon: mdi:calendar
+
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_DAY_FRI
+        name: V
+        icon: mdi:calendar
+
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_DAY_SAT
+        name: S
+        icon: mdi:calendar
+
+      - type: tile
+        entity: switch.ENTITY_ID_AQUI_DAY_SUN
+        name: D
+        icon: mdi:calendar
+
+  # HVAC Sync (controles)
+  - type: entities
+    title: HVAC Sync
+    show_header_toggle: false
+    entities:
+      - entity: select.ENTITY_ID_AQUI_HVAC_THERMOSTAT
+        name: Thermostat
+        icon: mdi:thermostat
+
+      - entity: select.ENTITY_ID_AQUI_HVAC_AIRFLOW
+        name: Airflow
+        icon: mdi:fan-auto
+
+      - entity: number.ENTITY_ID_AQUI_HVAC_ON_DELAY
+        name: ON delay (s)
+        icon: mdi:timer-play-outline
+
+      - entity: number.ENTITY_ID_AQUI_HVAC_OFF_DELAY
+        name: OFF delay (s)
+        icon: mdi:timer-stop-outline
