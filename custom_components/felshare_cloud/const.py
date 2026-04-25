@@ -3,7 +3,7 @@ from __future__ import annotations
 DOMAIN = "felshare_cloud"
 
 # Integration version (kept in code to build polite UA strings and diagnostics)
-VERSION = "0.1.6.13"
+VERSION = "0.1.6.14"
 
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
