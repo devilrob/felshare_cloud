@@ -40,11 +40,6 @@ DEFAULT_STARTUP_STALE_MINUTES = 30
 # own Work schedule (days + start/end), to avoid duplicated day/time entities.
 CONF_HVAC_SYNC_ENABLED = "hvac_sync_enabled"
 CONF_HVAC_SYNC_CLIMATE_ENTITY = "hvac_sync_climate_entity"
-# Deprecated (kept for backwards compatibility): previously HVAC Sync had its own
-# independent schedule. As of 0.1.6.10, HVAC Sync uses the diffuser Work schedule.
-CONF_HVAC_SYNC_DAYS_MASK = "hvac_sync_days_mask"
-CONF_HVAC_SYNC_START = "hvac_sync_start"
-CONF_HVAC_SYNC_END = "hvac_sync_end"
 CONF_HVAC_SYNC_ON_DELAY_SECONDS = "hvac_sync_on_delay_seconds"
 CONF_HVAC_SYNC_OFF_DELAY_SECONDS = "hvac_sync_off_delay_seconds"
 
@@ -55,9 +50,6 @@ CONF_HVAC_SYNC_AIRFLOW_MODE = "hvac_sync_airflow_mode"
 DEFAULT_HVAC_SYNC_AIRFLOW_MODE = "cooling_only"
 
 DEFAULT_HVAC_SYNC_ENABLED = False
-DEFAULT_HVAC_SYNC_DAYS_MASK = 0x7F  # Sun..Sat
-DEFAULT_HVAC_SYNC_START = "00:00"
-DEFAULT_HVAC_SYNC_END = "23:59"
 DEFAULT_HVAC_SYNC_ON_DELAY_SECONDS = 60
 DEFAULT_HVAC_SYNC_OFF_DELAY_SECONDS = 60
 

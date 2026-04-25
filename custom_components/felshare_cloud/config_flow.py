@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-import async_timeout
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -51,7 +51,7 @@ async def _login_and_devices(hass: HomeAssistant, email: str, password: str) -> 
 
     # Login
     try:
-        async with async_timeout.timeout(20):
+        async with asyncio.timeout(20):
             resp = await session.post(
                 f"{API_BASE}/login",
                 json={"username": email, "password": password},
@@ -73,7 +73,7 @@ async def _login_and_devices(hass: HomeAssistant, email: str, password: str) -> 
 
     # Devices
     try:
-        async with async_timeout.timeout(20):
+        async with asyncio.timeout(20):
             resp = await session.get(
                 f"{API_BASE}/device",
                 headers={"token": token, "Accept": "application/json", "User-Agent": f"HomeAssistant-Felshare/{VERSION}"},
