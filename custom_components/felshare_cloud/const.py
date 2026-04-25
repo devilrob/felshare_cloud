@@ -40,8 +40,7 @@ DEFAULT_STARTUP_STALE_MINUTES = 30
 # own Work schedule (days + start/end), to avoid duplicated day/time entities.
 CONF_HVAC_SYNC_ENABLED = "hvac_sync_enabled"
 CONF_HVAC_SYNC_CLIMATE_ENTITY = "hvac_sync_climate_entity"
-# Deprecated (kept for backwards compatibility): previously HVAC Sync had its own
-# independent schedule. As of 0.1.6.10, HVAC Sync uses the diffuser Work schedule.
+# Kept for backwards compatibility with time.py (legacy platform, removed from PLATFORMS in 0.1.6.10)
 CONF_HVAC_SYNC_DAYS_MASK = "hvac_sync_days_mask"
 CONF_HVAC_SYNC_START = "hvac_sync_start"
 CONF_HVAC_SYNC_END = "hvac_sync_end"

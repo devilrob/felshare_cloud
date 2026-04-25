@@ -143,7 +143,7 @@ class FelshareHub:
         # Outbound MQTT hardening
         self._outbox: "OrderedDict[str, bytes]" = OrderedDict()
         self._outbox_cv = threading.Condition()
-        self._publish_history: deque[float] = deque(maxlen=200)
+        self._publish_history: deque[float] = deque(maxlen=30)
 
         # Login throttling (HTTP 401/403/429)
         self._login_blocked_until: float = 0.0
@@ -340,7 +340,8 @@ class FelshareHub:
             code = getattr(e, "code", None)
             # Read body (best-effort) for debugging.
             try:
-                _ = e.read()
+                _body = e.read()
+                self.logger.debug("Login HTTP error body: %s", _body[:200] if _body else b"")
             except Exception:
                 pass
 
@@ -416,7 +417,7 @@ class FelshareHub:
                 mqtt_failures_with_token = 0
 
             except Exception as e:
-                self.logger.error("MQTT error: %s", e)
+                self.logger.error("MQTT error: %s", e, exc_info=True)
                 self._stop_mqtt_client()
                 mqtt_failures_with_token += 1
 
@@ -571,6 +572,7 @@ class FelshareHub:
 
                 if time.time() - t0 > 15:
                     raise RuntimeError("MQTT connect timeout")
+                time.sleep(0.1)
         except Exception:
             # Ensure we don't leak a paho thread when the connect attempt fails.
             with self._lock:
@@ -614,7 +616,7 @@ class FelshareHub:
     def _payload_key(self, payload: bytes) -> str:
         if payload == b"\x0C":
             return "bulk_request"
-        if payload == b"\x05" or (payload and payload[0] == 0x05 and len(payload) == 1):
+        if payload and payload[0] == 0x05:
             return "status_request"
         if payload and payload[0] == 0x32:
             return "work_schedule"
@@ -697,7 +699,7 @@ class FelshareHub:
                 self.state.last_tx_payload_hex = _bytes_to_hex(payload)
             except Exception as e:
                 # If disconnected mid-flight, requeue and let reconnect logic handle it.
-                self.logger.debug("Publish failed (%s): %s", key, e)
+                self.logger.warning("Publish failed (%s): %s", key, e)
                 self.state.last_error = f"tx_failed({key}): {e}"
                 with self._outbox_cv:
                     # Put it back at the front.
@@ -785,7 +787,7 @@ class FelshareHub:
 
             # derived liquid level %
             if self.state.capacity and self.state.remain_oil is not None and self.state.capacity > 0:
-                self.state.liquid_level = int((self.state.remain_oil * 100) // self.state.capacity)
+                self.state.liquid_level = min(100, int((self.state.remain_oil * 100) // self.state.capacity))
 
         except Exception as e:
             self.logger.debug("Failed parsing RXD payload: %s", e)
@@ -916,7 +918,7 @@ class FelshareHub:
                 raw = int.from_bytes(p[1:3], "big", signed=False)
                 self.state.capacity = raw
                 if self.state.remain_oil is not None and raw > 0:
-                    self.state.liquid_level = int((self.state.remain_oil * 100) // raw)
+                    self.state.liquid_level = min(100, int((self.state.remain_oil * 100) // raw))
                 return
 
             # remain oil: 0x10 + uint16 (ml)
@@ -924,7 +926,7 @@ class FelshareHub:
                 raw = int.from_bytes(p[1:3], "big", signed=False)
                 self.state.remain_oil = raw
                 if self.state.capacity and self.state.capacity > 0:
-                    self.state.liquid_level = int((raw * 100) // self.state.capacity)
+                    self.state.liquid_level = min(100, int((raw * 100) // self.state.capacity))
                 return
 
         except Exception as e:

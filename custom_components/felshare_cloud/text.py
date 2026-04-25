@@ -34,7 +34,7 @@ class FelshareOilNameText(FelshareEntity, TextEntity):
     _attr_icon = "mdi:flower"
     _attr_mode = TextMode.TEXT
     _attr_native_min = 0
-    _attr_native_max = 32
+    _attr_native_max = 10
 
     def __init__(self, coordinator: FelshareCoordinator, entry: ConfigEntry, dev: str) -> None:
         super().__init__(coordinator, entry, dev)
