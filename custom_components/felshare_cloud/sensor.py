@@ -73,7 +73,7 @@ class FelshareMqttStatusSensor(FelshareEntity, SensorEntity):
         manual_snap = getattr(hvac_sync, "_manual_snapshot", None) if hvac_sync else None
         manual_ts = manual_snap.get("captured_ts") if isinstance(manual_snap, dict) else None
         return {
-            "last_seen": d.last_seen.isoformat() if d.last_seen else None,
+            "last_seen": d.last_seen.replace(tzinfo=timezone.utc).isoformat() if d.last_seen else None,
             "last_seen_ts": d.last_seen_ts,
             "last_seen_utc": _iso_from_ts(d.last_seen_ts),
 

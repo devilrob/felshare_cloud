@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.6.14
+### 🔧 Bug fixes & stability (production audit)
+- **Fix: CPU spike on reconnect** — eliminated a busy-wait loop in the MQTT connect logic that could peg a CPU core for up to 15 seconds on every reconnect attempt.
+- **Fix: liquid level sensor** — now correctly capped at 100% even if remaining oil exceeds capacity.
+- **Fix: oil name field** — UI limit aligned with protocol limit (10 characters); previously the UI allowed 32 chars but only 10 bytes were sent to the device, causing silent truncation.
+- **Fix: sync payload coalescing** — learned multi-byte status request payloads (TXD learning) now correctly deduplicate with standard status requests.
+- **Improved logs** — MQTT errors now include full stack traces; publish failures surfaced as warnings instead of debug messages; login HTTP error bodies logged for easier debugging.
+
 ## 0.1.6.13
 ### ⏱️ HVAC Sync forces Work run/stop (60/180)
 - When **HVAC Sync** is turned ON, the integration sets:
