@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6.15
+### 🧹 Code cleanup
+- **Removed `time.py`** — legacy platform removed from `PLATFORMS` since 0.1.6.10. The file was dead code; entity registry migration already handles disabling/hiding the old `hvac_sync_start` and `hvac_sync_end` entities on load.
+- **Migrated `async_timeout` → `asyncio.timeout`** — replaces the deprecated `async_timeout` library with the native `asyncio.timeout` (Python 3.11+, available since HA 2024.6.0).
+- **Removed unused constants** — `CONF_HVAC_SYNC_DAYS_MASK`, `CONF_HVAC_SYNC_START`, `CONF_HVAC_SYNC_END` were only used by the now-deleted `time.py`.
+
 ## 0.1.6.14
 ### 🔧 Bug fixes & stability (production audit)
 - **Fix: CPU spike on reconnect** — eliminated a busy-wait loop in the MQTT connect logic that could peg a CPU core for up to 15 seconds on every reconnect attempt.
